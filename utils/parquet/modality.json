@@ -1,0 +1,64 @@
+{
+    "state": {
+        "waist": {
+            "start": 0,
+            "end": 3
+        },
+        "head": {
+            "start": 3,
+            "end": 5
+        },
+        "left_arm": {
+            "start": 5,
+            "end": 12
+        },
+        "right_arm": {
+            "start": 12,
+            "end": 19
+        },
+        "left_hand": {
+            "start": 19,
+            "end": 25
+        },
+        "right_hand": {
+            "start": 25,
+            "end": 31
+        }
+    },
+    "action": {
+        "waist": {
+            "start": 0,
+            "end": 3
+        },
+        "head": {
+            "start": 3,
+            "end": 5
+        },
+        "left_arm": {
+            "start": 5,
+            "end": 12
+        },
+        "right_arm": {
+            "start": 12,
+            "end": 19
+        },
+        "left_hand": {
+            "start": 19,
+            "end": 25
+        },
+        "right_hand": {
+            "start": 25,
+            "end": 31
+        }
+    },
+    "video": {
+        "rs_view": {
+            "original_key": "observation.images.ego_realsense"
+        }
+    },
+    "annotation": {
+        "human.task_description": {
+            "original_key": "task_index"
+        }
+    }
+}

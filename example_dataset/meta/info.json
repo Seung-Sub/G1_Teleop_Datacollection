@@ -1,0 +1,187 @@
+{
+    "codebase_version": "v2.1",
+    "robot_type": null,
+    "total_episodes": 98,
+    "total_frames": 70114,
+    "total_tasks": 2,
+    "total_videos": 196,
+    "total_chunks": 1,
+    "chunks_size": 98,
+    "fps": 20,
+    "splits": {
+        "train": "0:98"
+    },
+    "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
+    "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
+    "features": {
+        "observation.state": {
+            "dtype": "float64",
+            "shape": [
+                32
+            ],
+            "names": [
+                "waist_yaw_joint",
+                "waist_roll_joint",
+                "waist_pitch_joint",
+                "left_shoulder_pitch_joint",
+                "left_shoulder_roll_joint",
+                "left_shoulder_yaw_joint",
+                "left_elbow_joint",
+                "left_wrist_roll_joint",
+                "left_wrist_pitch_joint",
+                "left_wrist_yaw_joint",
+                "right_shoulder_pitch_joint",
+                "right_shoulder_roll_joint",
+                "right_shoulder_yaw_joint",
+                "right_elbow_joint",
+                "right_wrist_roll_joint",
+                "right_wrist_pitch_joint",
+                "right_wrist_yaw_joint",
+                "L_pinky_proximal_joint",
+                "L_ring_proximal_joint",
+                "L_middle_proximal_joint",
+                "L_index_proximal_joint",
+                "L_thumb_proximal_pitch_joint",
+                "L_thumb_proximal_yaw_joint",
+                "right_thumb_joint_0",
+                "right_thumb_joint_1",
+                "right_thumb_joint_2",
+                "right_thumb_joint_3",
+                "right_index_joint_1",
+                "right_index_flexion",
+                "right_middle_joint_1",
+                "right_middle_flexion",
+                "right_ring_joint_1"
+            ]
+        },
+        "action": {
+            "dtype": "float64",
+            "shape": [
+                32
+            ],
+            "names": [
+                "waist_yaw_joint",
+                "waist_roll_joint",
+                "waist_pitch_joint",
+                "left_shoulder_pitch_joint",
+                "left_shoulder_roll_joint",
+                "left_shoulder_yaw_joint",
+                "left_elbow_joint",
+                "left_wrist_roll_joint",
+                "left_wrist_pitch_joint",
+                "left_wrist_yaw_joint",
+                "right_shoulder_pitch_joint",
+                "right_shoulder_roll_joint",
+                "right_shoulder_yaw_joint",
+                "right_elbow_joint",
+                "right_wrist_roll_joint",
+                "right_wrist_pitch_joint",
+                "right_wrist_yaw_joint",
+                "L_pinky_proximal_joint",
+                "L_ring_proximal_joint",
+                "L_middle_proximal_joint",
+                "L_index_proximal_joint",
+                "L_thumb_proximal_pitch_joint",
+                "L_thumb_proximal_yaw_joint",
+                "right_thumb_joint_0",
+                "right_thumb_joint_1",
+                "right_thumb_joint_2",
+                "right_thumb_joint_3",
+                "right_index_joint_1",
+                "right_index_flexion",
+                "right_middle_joint_1",
+                "right_middle_flexion",
+                "right_ring_joint_1"
+            ]
+        },
+        "timestamp": {
+            "dtype": "float64",
+            "shape": [
+                1
+            ],
+            "names": null
+        },
+        "episode_index": {
+            "dtype": "int64",
+            "shape": [
+                1
+            ],
+            "names": null
+        },
+        "index": {
+            "dtype": "int64",
+            "shape": [
+                1
+            ],
+            "names": null
+        },
+        "frame_index": {
+            "dtype": "int64",
+            "shape": [
+                1
+            ],
+            "names": null
+        },
+        "task_index": {
+            "dtype": "int64",
+            "shape": [
+                1
+            ],
+            "names": null
+        },
+        "observation.img_state_delta": {
+            "dtype": "float32",
+            "shape": [
+                1
+            ],
+            "names": "img_state_delta"
+        },
+        "observation.images.ego_left_view": {
+            "dtype": "video",
+            "shape": [
+                480,
+                640,
+                3
+            ],
+            "names": [
+                "height",
+                "width",
+                "channel"
+            ],
+            "info": {
+                "video.height": 480,
+                "video.width": 640,
+                "video.codec": "h264",
+                "video.pix_fmt": "yuv420p",
+                "video.is_depth_map": false,
+                "video.fps": 20.0,
+                "video.channels": 3,
+                "has_audio": false
+            }
+        },
+        "observation.images.ego_right_view": {
+            "dtype": "video",
+            "shape": [
+                480,
+                640,
+                3
+            ],
+            "names": [
+                "height",
+                "width",
+                "channel"
+            ],
+            "info": {
+                "video.height": 480,
+                "video.width": 640,
+                "video.codec": "h264",
+                "video.pix_fmt": "yuv420p",
+                "video.is_depth_map": false,
+                "video.fps": 20.0,
+                "video.channels": 3,
+                "has_audio": false
+            }
+        }
+    },
+    "discarded_episode_indices": []
+}
