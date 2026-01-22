@@ -500,7 +500,7 @@ python main.py --mode kistar_inspire_teleop
 💡 **[중요]** 수집한 데이터는 연구단내 공유를 위해 아래 워크시트에 정보를 기록해주세요.
 해당 워크시트를 통해 연구단 내에서 현재 수집된 데이터를 파악하고, 또 필요시 서로 요청하고 다양한 학습 모델을 테스트하기 위함입니다.
 
-https://kist.gov-dooray.com/office/drives/4048810574976934342/files/4249477902737574617
+https://kist.gov-dooray.com/office/drives/4250966067045491971/files/4250962310863287468
 
 ---
 ---
