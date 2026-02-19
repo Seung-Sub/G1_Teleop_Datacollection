@@ -738,26 +738,16 @@ class UnitreeG1KistarInspireKistarDataConfig(UnitreeG1DataConfig):
     language_keys = ["annotation.human.task_description"]
     observation_indices = [0]
     action_indices = list(range(16))
-
-class UnitreeG1KistarInspireKistarDataConfig(UnitreeG1DataConfig):
-    """ZED 양안, 왼손 Inspire, 오른손 Kistar 설정"""
-    video_keys = ["video.ego_left_view", "video.ego_right_view"]
-    state_keys = ["state.waist","state.left_arm","state.right_arm","state.inspire_hand","state.kistar_hand"]
-    action_keys = ["action.waist","action.left_arm", "action.right_arm","action.inspire_hand","action.kistar_hand"]
-    language_keys = ["annotation.human.task_description"]
-    observation_indices = [0]
-    action_indices = list(range(16))
-```
 ###########################################################################################
 
->DATA_CONFIG_MAP = {
+DATA_CONFIG_MAP = {
 
->    "unitree_g1": UnitreeG1DataConfig(),
+    "unitree_g1": UnitreeG1DataConfig(),
 
->    "unitree_g1_inspire_kistar": UnitreeG1KistarInspireKistarDataConfig()
+    "unitree_g1_inspire_kistar": UnitreeG1KistarInspireKistarDataConfig()
     
->}
-
+}
+```
 
 *   **기타 하이퍼파라미터**:
     *   `--batch-size`, `--learning-rate`, `--max-steps` 등 다른 학습 관련 파라미터는 필요에 따라 자유롭게 조정할 수 있습니다.
@@ -847,7 +837,7 @@ class UnitreeG1KistarInspireKistarDataConfig(UnitreeG1DataConfig):
         *   **`maf`**: (Moving Average Filter): 단순 이동 평균 필터
         *   **`lipo`**: (Linear Interpolation): 선형 보간으로 프레임 간 부드러운 전환
 
-    *   `--hand_model`: kistar_hand DOF 처리 관련 (`full`, `reduced`, 'reduced_v3', ...)
+    *   `--hand_model`: kistar_hand DOF 처리 관련 (`full`, `reduced`, `reduced_v3`, ...)
         *   **`full`**: DOF reduction 없이 16 자유도를 모두 사용
         *   **`reduced`**: 16 자유도를 6자유도로 mapping한 policy의 경우 사용 (해당 부분을 참고하여 원하시는 손 제어 모델을 만드시면 됩니다.)
         *   **`reduced_v3`**: example_dataset과 pair 되는 세팅으로, 이러한 세팅을 만들어 사용하시면 됩니다.
