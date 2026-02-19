@@ -320,7 +320,7 @@ def worker_record(shared_event, shm_name, shared_lock):
                         # print("hand_qpos_observation: ",hand_qpos/np.pi*180)
 
                         if current_mode=='kistar_inspire_teleop':
-                            logger_mp.info("[Worker Record] kistar inspire teleoperation working !!")
+                            # logger_mp.info("[Worker Record] kistar inspire teleoperation working !!")
                             obs_hand = robot_obs["obs_hand"]
                             left_hand = obs_hand[:6]
                             

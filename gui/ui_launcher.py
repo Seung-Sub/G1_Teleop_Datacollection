@@ -2,7 +2,6 @@
 import os, sys
 
 os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
-import qdarkstyle
 import logging
 from threading import Thread
 from PyQt5 import uic, QtWidgets, QtCore, QtGui
@@ -27,7 +26,6 @@ import time
 
 import numpy as np
 import cv2
-import qdarkstyle
 
 # GUI 마스크 적용 토글
 APPLY_MASK_IN_GUI = True
@@ -65,15 +63,6 @@ class TeleopUI(QtWidgets.QMainWindow):
         self.rec_data    = deque(maxlen=100)
 
         uic.loadUi('gui/teleop_ui.ui', self)
-
-        def apply_dark_style_to_widget(widget):
-            widget.setStyleSheet(qdarkstyle.load_stylesheet_pyqt5())
-
-        for widget in self.findChildren(QtWidgets.QWidget):
-            apply_dark_style_to_widget(widget)
-
-        for widget in self.findChildren(QtWidgets.QWidget):
-            apply_dark_style_to_widget(widget)
 
         self._apply_gray_theme()
         # 오른쪽 패널(Loop Hz / Mode)을 완전히 제거해 카메라 영역을 확장
@@ -1317,7 +1306,6 @@ def run_ui(shared_event, shm_name, shared_lock):
 
     # Qt 애플리케이션 생성
     app = QtWidgets.QApplication(sys.argv)
-    app.setStyleSheet(qdarkstyle.load_stylesheet_pyqt5())
 
     # TeleopUI 인스턴스 생성 및 표시
     window = TeleopUI(shared_event,shm_name, shared_lock)
