@@ -7,7 +7,7 @@ from utils.rate import Rate
 
 from multiprocessing import shared_memory, Array, Lock
 from sharedmemory.shmManager import SharedMemoryManager
-from sharedmemory.shm_schema import TELEVISION, WORKER_FREQ, RECORD_MODE_LAYOUT, RECORD_EPISODE_LAYOUT, RECORD_TASK_LAYOUT, RECORD_TASK_LAYOUT, ROBOT_ACTION, ROBOT_OBS, KISTAR_HAND_ACTION, CURRENT_MODE_LAYOUT, MODE_MAPPING_i2s
+from sharedmemory.shm_schema import TELEVISION, WORKER_FREQ, RECORD_MODE_LAYOUT, RECORD_EPISODE_LAYOUT, RECORD_TASK_LAYOUT, RECORD_TASK_LAYOUT, ROBOT_ACTION, ROBOT_OBS, KISTAR_HAND_ACTION, CURRENT_MODE_LAYOUT, MODE_MAPPING_INV
 import traceback
 import pandas as pd
 
@@ -403,7 +403,7 @@ def get_current_mode(current_mode_shm):
     try:
         mode_data = current_mode_shm.read_data()
         mode_int = int(mode_data["mode"].item())
-        current_mode = MODE_MAPPING_i2s.get(mode_int, 'teleop')
+        current_mode = MODE_MAPPING_INV.get(mode_int, 'teleop')
         return current_mode
     except Exception as e:
         logger_mp.warning(f"[VR Hand IK] 모드 정보 읽기 실패: {e}, 기본값 'teleop' 사용")
