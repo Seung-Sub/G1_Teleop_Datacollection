@@ -21,7 +21,7 @@ def analyze_parquet_columns(file_path):
             # 데이터가 비어있는 경우를 대비해 유효한 첫 번째 행을 찾습니다.
             try:
                 # dropna()를 사용하여 null이 아닌 첫 번째 데이터를 가져옵니다.
-                sample_data = df[col].dropna().iloc[5]
+                sample_data = df[col].dropna().iloc[100]
             except IndexError:
                 # 컬럼의 모든 데이터가 null인 경우
                 print(f"- 컬럼명: '{col}'")

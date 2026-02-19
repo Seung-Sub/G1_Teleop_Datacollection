@@ -42,6 +42,7 @@ class ZMQKistarReceiver:
         # 마지막으로 받은 데이터 저장 (연결 끊김 시 사용)
         self.last_hand_q_pos = np.zeros(16, dtype=np.float32)
         self.last_play_cnt = 0
+        self.last_kinesthetic_data = np.zeros(12, dtype=np.float32)
 
     def on_start(self):
         """ZMQ 소켓 초기화"""
@@ -86,6 +87,10 @@ class ZMQKistarReceiver:
                 # print("play_cnt: ",play_cnt,"   /   data received: ",hand_q_pos)
                 
                 # print("play_cnt: ",play_cnt)
+                
+                kinesthetic_data = data_dict['kinesthetic_data']
+                
+                # print("kinesthetic_data: ",kinesthetic_data)
 
                 # 데이터 유효성 검증
                 if len(hand_q_pos) != 16:
@@ -94,12 +99,14 @@ class ZMQKistarReceiver:
 
                 # 마지막 데이터 저장
                 self.last_hand_q_pos = hand_q_pos.copy()
+                self.last_kinesthetic_data = kinesthetic_data.copy()
                 self.last_play_cnt = int(play_cnt)
 
                 #print(self.last_hand_q_pos)
                 # 공유 메모리에 데이터 저장
                 self.kistar_hand_received_shm.write_data(
                     hand_q_pos=self.last_hand_q_pos,
+                    hand_kinesthetic=self.last_kinesthetic_data,
                     play_cnt=np.int32(self.last_play_cnt)
                 )
 
@@ -119,6 +126,7 @@ class ZMQKistarReceiver:
             # 마지막으로 받은 데이터로 공유 메모리 업데이트 (연결 복구 시까지)
             self.kistar_hand_received_shm.write_data(
                 hand_q_pos=self.last_hand_q_pos,
+                hand_kinesthetic=self.last_kinesthetic_data,
                 play_cnt=np.int32(self.last_play_cnt)
             )
             return False

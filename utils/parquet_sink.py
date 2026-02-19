@@ -13,7 +13,8 @@ class ParquetSink:
     """
     def __init__(self, logger):
         self.logger = logger
-        self._states: Optional[List[List[float]]] = None
+        self._states_action: Optional[List[List[float]]] = None
+        self._states_sensor: Optional[List[List[float]]] = None
         self._actions: Optional[List[List[float]]] = None
         self._timestamps: Optional[List[float]] = None
         self._task: Optional[str] = None
@@ -22,12 +23,13 @@ class ParquetSink:
     def start_episode(self, task_name: str, ep_idx: int):
         self._task = task_name
         self._ep_idx = ep_idx
-        self._states, self._actions, self._timestamps = [], [], []
+        self._states_action, self._states_sensor, self._actions, self._timestamps = [], [], [], []
         self.logger.info(f"[PARQUET] start episode={ep_idx} (task={task_name})")
 
-    def append(self, state_vec: np.ndarray, action_vec: np.ndarray, t_sec: float):
+    def append(self, state_vec_action: np.ndarray, state_vec_sensor: np.ndarray, action_vec: np.ndarray, t_sec: float):
         # float32 + list 변환 (원본 코드 호환)
-        self._states.append(state_vec.astype(np.float32).tolist())
+        self._states_action.append(state_vec_action.astype(np.float32).tolist())
+        self._states_sensor.append(state_vec_sensor.astype(np.float32).tolist())
         self._actions.append(action_vec.astype(np.float32).tolist())
         self._timestamps.append(float(t_sec))
 
@@ -39,12 +41,13 @@ class ParquetSink:
         os.makedirs(data_chunk_folder, exist_ok=True)
 
         df = pd.DataFrame({
-            "observation.state": self._states,
+            "observation.state": self._states_action,
+            "observation.sensor": self._states_sensor,
             "action": self._actions,
             "timestamp": self._timestamps,
             "episode_index": self._ep_idx,
-            "index": list(range(len(self._states))),
-            "frame_index": list(range(len(self._states))),
+            "index": list(range(len(self._states_action))),
+            "frame_index": list(range(len(self._states_action))),
         })
 
         parquet_name = f"episode_{self._ep_idx:06d}.parquet"
@@ -54,4 +57,4 @@ class ParquetSink:
         self.logger.info(f"[PARQUET] Episode {self._ep_idx} saved to {parquet_path}")
 
         # 내부 상태 정리
-        self._states = self._actions = self._timestamps = None
+        self._states_action = self._states_sensor = self._actions = self._timestamps = None

@@ -483,7 +483,7 @@ python main.py --mode kistar_inspire_teleop
     *   **루트 경로**: `./record/<Task_Name>/`
     *   **관절 데이터 (Parquet)**:
         *   경로: `data/chunk-000/`
-        *   내용: 로봇 몸체, 양팔, 손의 관절 상태(`observation.state`) 및 제어 액션(`action`)이 타임스탬프와 함께 `.parquet` 파일 형식으로 저장됩니다.
+        *   내용: 로봇 몸체, 양팔, 손의 관절 상태(`observation.state`), 손의 kinesthetic sensor 값 (`observation.sensor`) 및 제어 액션(`action`)이 타임스탬프와 함께 `.parquet` 파일 형식으로 저장됩니다.
     *   **영상 데이터 (MP4)**:
         *   경로: `videos/chunk-000/`
         *   내용: 각 카메라 뷰(ZED 좌/우, Realsense 등)의 영상이 별도의 폴더에 `.mp4` 파일로 저장됩니다.

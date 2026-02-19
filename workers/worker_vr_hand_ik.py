@@ -7,7 +7,7 @@ from utils.rate import Rate
 
 from multiprocessing import shared_memory, Array, Lock
 from sharedmemory.shmManager import SharedMemoryManager
-from sharedmemory.shm_schema import TELEVISION, WORKER_FREQ, RECORD_MODE_LAYOUT, RECORD_EPISODE_LAYOUT, RECORD_TASK_LAYOUT, RECORD_TASK_LAYOUT, ROBOT_ACTION, ROBOT_OBS, KISTAR_HAND_ACTION, CURRENT_MODE_LAYOUT, MODE_MAPPING
+from sharedmemory.shm_schema import TELEVISION, WORKER_FREQ, RECORD_MODE_LAYOUT, RECORD_EPISODE_LAYOUT, RECORD_TASK_LAYOUT, RECORD_TASK_LAYOUT, ROBOT_ACTION, ROBOT_OBS, KISTAR_HAND_ACTION, CURRENT_MODE_LAYOUT, MODE_MAPPING_i2s
 import traceback
 import pandas as pd
 
@@ -403,7 +403,7 @@ def get_current_mode(current_mode_shm):
     try:
         mode_data = current_mode_shm.read_data()
         mode_int = int(mode_data["mode"].item())
-        current_mode = MODE_MAPPING.get(mode_int, 'teleop')
+        current_mode = MODE_MAPPING_i2s.get(mode_int, 'teleop')
         return current_mode
     except Exception as e:
         logger_mp.warning(f"[VR Hand IK] 모드 정보 읽기 실패: {e}, 기본값 'teleop' 사용")
@@ -646,7 +646,7 @@ def worker_vr_hand_ik(shared_event, shm_name, shared_lock):
                     # 현재 모드 확인
                     current_mode = get_current_mode(current_mode_shm)
 
-                    if current_mode in ['kistar_teleop', 'kistar_only']:
+                    if current_mode in ['kistar_teleop', 'kistar_inspire_teleop']:
                         # KISTAR 모드: kistar_hand_joints_shm의 데이터를 사용하므로 dual_hand는 0으로 설정
                         with dual_hand_data_lock:
                             dual_hand_state_array[:] = np.zeros(12)
@@ -698,7 +698,7 @@ def worker_vr_hand_ik(shared_event, shm_name, shared_lock):
                     replay_actions   = np.stack(df["action"].to_numpy()).astype(np.float64)
                     replay_length    = replay_actions.shape[0]
                     # 모드별로 핸드 데이터 추출
-                    if current_mode in ['kistar_teleop', 'kistar_only']:
+                    if current_mode in ['kistar_teleop', 'kistar_inspire_teleop']:
                         # KISTAR 모드: 뒤 16개 추출 (19:35)
                         replay_hand_data = replay_actions[:, 19:]   # (N,16) - KISTAR hand 16개 자유도
                         logger_mp.info(f"[REPLAY INIT] KISTAR mode - hand_data shape = {replay_hand_data.shape}")
@@ -746,7 +746,7 @@ def worker_vr_hand_ik(shared_event, shm_name, shared_lock):
                     idx = replay_frame_idx
                     hand_vec = replay_hand_data[idx]
 
-                    if current_mode in ['kistar_teleop', 'kistar_only']:
+                    if current_mode in ['kistar_teleop', 'kistar_inspire_teleop']:
                         # KISTAR 모드: kistar_hand_joints_shm에 16개 데이터를 저장
                         # dual_hand_action_array는 사용하지 않음
                         kistar_hand_action_shm.write_data(
