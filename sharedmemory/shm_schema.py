@@ -65,6 +65,7 @@ KISTAR_HAND_ACTION = [
 # ASUS NUC로부터 받는 KISTAR Hand 데이터
 KISTAR_HAND_RECEIVED = [
     ("hand_q_pos",         (16,),   np.float32),    # 16개 조인트 위치
+    ("hand_kinesthetic",         (12,),   np.float32),    # 16개 조인트 위치
     ("play_cnt",           (),      np.int32),      # 플레이 카운트
 ]
 

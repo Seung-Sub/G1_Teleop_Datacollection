@@ -94,7 +94,7 @@ def worker_record(shared_event, shm_name, shared_lock):
         logger_mp.info("[Reocord Worker] Read Current Mode!!")
         current_mode = get_current_mode(current_mode_shm)
         logger_mp.info("[Reocord Worker] Read Current Finish!!")
-        if current_mode in ['kistar_teleop', 'kistar_only', 'kistar_inspire_teleop'] and "kistar_hand_received_shm" in shm_name:
+        if current_mode in ['kistar_teleop', 'kistar_inspire_teleop'] and "kistar_hand_received_shm" in shm_name:
             try:
                 kistar_hand_received_shm = SharedMemoryManager(
                     KISTAR_HAND_RECEIVED,
@@ -310,28 +310,29 @@ def worker_record(shared_event, shm_name, shared_lock):
 
                 # 모드별 손 데이터 처리 
                 # logger_mp.info(f"current mode: {current_mode}")
-                if current_mode in ['kistar_teleop', 'kistar_only', 'kistar_inspire_teleop']:
+                if current_mode in ['kistar_teleop', 'kistar_inspire_teleop']:
                     # KISTAR 손 모드: KISTAR 데이터 사용 (16개 관절)
                     # Observation: ASUS NUC로부터 받은 현재 상태
                     if kistar_data is not None:
                         hand_qpos = kistar_data["hand_q_pos"]  # 16개 (observation)
+                        hand_kinesthetic = kistar_data["hand_kinesthetic"]  # 12개 (sensor observation)
                         
                         # print("hand_qpos_observation: ",hand_qpos/np.pi*180)
 
+                        if current_mode=='kistar_inspire_teleop':
+                            logger_mp.info("[Worker Record] kistar inspire teleoperation working !!")
+                            obs_hand = robot_obs["obs_hand"]
+                            left_hand = obs_hand[:6]
+                            
+                            hand_qpos=np.concatenate([left_hand, hand_qpos])
+                                                    
+                        if hand_kinesthetic is None:                            
+                            logger_mp.warning("[RECORDING] KISTAR 손 sensor 없음, 기본값 사용")
+                            hand_kinesthetic = np.zeros(12, dtype=np.float32)                    
+                    
                     else:
                         logger_mp.warning("[RECORDING] KISTAR 손 observation 없음, 기본값 사용")
                         hand_qpos = np.zeros(16, dtype=np.float32)
-
-                    if current_mode=='kistar_inspire_teleop':
-                        logger_mp.info("[Worker Record] kistar inspire teleoperation working !!")
-                        obs_hand = robot_obs["obs_hand"]
-                        left_hand = obs_hand[:6]
-                        
-                        print("kistar_qpos_set: ",hand_qpos)
-                        print("inspire_hand_set: ",left_hand)
-                        hand_qpos=np.concatenate([left_hand, hand_qpos])
-
-                        print("hand_pose set: ",hand_qpos)
                     
                     # Action: 전송된 제어 명령
                     if kistar_action_data is not None:
@@ -358,11 +359,13 @@ def worker_record(shared_event, shm_name, shared_lock):
                     action_hand = robot_action["action_hand"]
                     hand_qpos = obs_hand
                     hand_action = action_hand
+                    hand_kinesthetic = np.zeros(12, dtype=np.float32)              
 
-                state_vec  = np.concatenate([qpos, hand_qpos])
+                state_vec  = np.concatenate([qpos, hand_qpos])                
+                state_vec_sensor  = hand_kinesthetic
                 action_vec = np.concatenate([action, hand_action])
 
-                parquet_sink.append(state_vec, action_vec, t_sec=frame_count/float(freq))
+                parquet_sink.append(state_vec, state_vec_sensor, action_vec, t_sec=frame_count/float(freq))
                 # 원본 이미지만 저장 (realsense, zed_left, zed_right)
                 video_sink.append(img_left, img_right, img_realsense)
 
