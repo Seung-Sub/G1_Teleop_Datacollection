@@ -4,7 +4,7 @@ from pathlib import Path
 import sys
 from tqdm import tqdm
 
-mode = 'reduced_v3'
+mode = 'only_kistar'
 
 def process_action_dimension(action_array):
     raw_length=41
@@ -97,6 +97,31 @@ def process_action_dimension(action_array):
             modified_action = np.delete(modified_action, indices_to_delete)
             #print('full mode action 수정 완료')
             return modified_action
+
+        elif mode == 'only_kistar':
+            # 0~2  : waist
+            # 3~4  : neck (REMOVE)
+            # 5~11 : left arm (REMOVE index 11) 
+            # 12~18: right arm
+            # 19~24: inspire hand (REMOVE ALL)
+            # 25~40: kistar hand (KEEP ALL, 16 DOF)
+
+            modified_action = action_array.copy()
+
+            # 제거할 인덱스들
+            # neck: 3,4
+            # left arm wrist roll: 11
+            # inspire hand: 19~24
+            indices_to_delete = [3, 4, 11, 19, 20, 21, 22, 23, 24]
+
+            # 실제로는 값 변형 없이 그대로 사용
+            # (kistar hand는 전부 살림)
+
+            modified_action = np.delete(modified_action, indices_to_delete)
+
+            return modified_action
+
+
 
     else:
         print(f"Warning: 예상치 못한 action shape {action_array.shape}을 발견하여 수정하지 않았습니다.", file=sys.stderr)
@@ -194,6 +219,17 @@ def process_observation_dimension(observation_array):
             modified_observation = np.delete(modified_observation, indices_to_delete)
             #print('full mode action 수정 완료')
             return modified_observation
+
+
+        elif mode == 'only_kistar':
+            modified_observation = observation_array.copy()
+
+            indices_to_delete = [3, 4, 11, 19, 20, 21, 22, 23, 24]
+
+            modified_observation = np.delete(modified_observation, indices_to_delete)
+
+            return modified_observation
+
             
     else:
         print(f"Warning: 예상치 못한 action shape {observation_array.shape}을 발견하여 수정하지 않았습니다.", file=sys.stderr)

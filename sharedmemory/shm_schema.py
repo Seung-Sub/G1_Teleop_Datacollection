@@ -13,6 +13,17 @@ MODE_MAPPING = {
     'kistar_inspire_teleop': 6
 }
 
+MODE_MAPPING_INV = {
+    0: 'teleop',
+    1: 'gr00t',
+    2: 'amo',
+    3: 'gr00t_zed',
+    4: 'kistar_teleop',
+    5: 'kistar_only',
+    6: 'kistar_inspire_teleop'
+}
+
+
 ROBOT_OBS = [
     ("obs_leg",        (12,),    np.float64),
     ("obs_waist",        (3,),    np.float64),

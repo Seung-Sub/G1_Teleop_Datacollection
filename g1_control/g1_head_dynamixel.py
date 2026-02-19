@@ -76,7 +76,7 @@ class DataBuffer:
 
 class Dynamixel_Controller:
     def __init__(self):
-        logger_mp.info("Initialize Dynamixel")
+        print("Initialize Dynamixel")
         #self.q_target = np.array([2048, 2048])
         self.q_target = np.array([2048, 1934])
         self.port_lock = threading.Lock()
@@ -229,7 +229,6 @@ class Dynamixel_Controller:
                 q_target = self.q_target
                 q_target = np.array([2048, 1934])
                 #q_target = np.array([2048, 2048])
-            
             # cliped_q_target = self.clip_q_target(q_target, velocity_limit = self.velocity_limit)
 
 

@@ -1,0 +1,16 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+import numpy as np
+
+path = "/home/ansur/G1_teleoperation/record/0209_apple_pickup_pcaK7/pca_basis_action_k7.npz"
+data = np.load(path)
+
+W = data["W"]    # (16, 7)
+mu = data["mu"]  # (16,)
+
+print("W shape:", W.shape)
+print("mu shape:", mu.shape)
+print("synergy 1 vector:\n", W[:, 0])
+print("synergy 2 vector:\n", W[:, 1])
+print("synergy 3 vector:\n", W[:, 2])
+print("synergy 4 vector:\n", W[:, 3])

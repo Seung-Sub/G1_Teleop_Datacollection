@@ -33,18 +33,7 @@ from rich.table import Table
 from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn  
 from rich.console import Group  
 
-# 프로젝트(gr00t) 전용 모듈
-import gr00t 
-from gr00t.experiment.data_config import DATA_CONFIG_MAP  
-from gr00t.model.policy import Gr00tPolicy  
-
-# ACT 전용 모듈
-# [변경] einops.rearrange 활성화: 이미지 텐서 재배열용 (원본은 주석처리되어 있었음)
-from einops import rearrange
-#from act.policy import ACTPolicy, CNNMLPPolicy
-import yaml
-import pickle
-
+# ----- (NEW 0211): PCA helpers -----
 # PCA actiom basis 로드 + 디코더 함수 추가
 PCA_BASIS_ACTION_PATH = "/home/ansur/G1_teleoperation/record/0209_apple_pickup_pcaK7/pca_basis_action_k7.npz"
 
@@ -127,6 +116,383 @@ def encode_hand_qpos_pca(hand_qpos_16d: np.ndarray, clip: float = 1.0):
         s_norm = np.clip(s_norm, -clip, clip)
 
     return s_norm.astype(np.float32)
+# ----- (END 0211): PCA helpers -----
+
+
+# 프로젝트(gr00t) 전용 모듈
+# ----- (NEW 0210): lazy import helper -----
+# Gr00t imports are heavy (they pull optional deps like pytorch3d).
+# Make them LAZY so `--policy maniflow` can run without installing everything.
+gr00t = None
+DATA_CONFIG_MAP = None
+Gr00tPolicy = None
+
+def _lazy_import_gr00t():
+    global gr00t, DATA_CONFIG_MAP, Gr00tPolicy
+
+    if gr00t is None:
+        import gr00t as _gr00t
+        gr00t = _gr00t
+
+    if DATA_CONFIG_MAP is None:
+        from gr00t.experiment.data_config import DATA_CONFIG_MAP as _DCM
+        DATA_CONFIG_MAP = _DCM
+
+    if Gr00tPolicy is None:
+        from gr00t.model.policy import Gr00tPolicy as _GP
+        Gr00tPolicy = _GP
+
+    return DATA_CONFIG_MAP, Gr00tPolicy
+# ----- (END 0210): lazy import helper -----
+
+# ACT 전용 모듈
+# [변경] einops.rearrange 활성화: 이미지 텐서 재배열용 (원본은 주석처리되어 있었음)
+from einops import rearrange
+#from act.policy import ACTPolicy, CNNMLPPolicy
+import yaml
+import pickle
+
+# ----- (NEW 0209): new imports for maniflow -----
+import contextlib
+import math
+from datetime import datetime
+try:
+    import dill
+    from omegaconf import OmegaConf
+except Exception:
+    dill = None
+    OmegaConf = None
+# ----- (END 0209): new imports for maniflow -----
+
+# ----- (NEW 0209): helpers for maniflow policy adapter -----
+def _strip_module_prefix(sd):
+    if not any(k.startswith("module.") for k in sd.keys()):
+        return sd
+    return {k[len("module."):]: v for k, v in sd.items()}
+
+def _register_omegaconf_resolvers():
+    """Make saved Hydra/OmegaConf configs usable in a plain python script."""
+    if OmegaConf is None:
+        return
+
+    import re
+
+    def _safe_eval(expr: str):
+        allowed = {"min": min, "max": max, "int": int, "float": float, "round": round, "math": math}
+        return eval(expr, {"__builtins__": {}}, allowed)
+
+    # ${eval:...}
+    OmegaConf.register_new_resolver("eval", _safe_eval, replace=True)
+
+    # ${now:...} (Hydra often uses this)
+    def _now(fmt: str = "%Y-%m-%d_%H-%M-%S"):
+        return datetime.now().strftime(fmt)
+
+    OmegaConf.register_new_resolver("now", _now, replace=True)
+# ----- (END 0209): helpers for maniflow policy adapter -----
+
+
+# ----- (NEW 0209): maniflow policy adapter -----
+class ManiFlowPolicyAdapter:
+    """
+    Drop-in replacement for Gr00tPolicy that satisfies:
+      - update_obs(obs_gr00t): called at 20Hz
+      - get_action(obs_gr00t): returns dict with keys action.waist/left_arm/right_arm/inspire_hand/kistar_hand
+
+    Assumption (matches your checkpoint printouts):
+      - obs keys expected by ManiFlow:
+          head_cam_left:  (1, n_obs_steps, 3, 240, 320) float in [0,1]
+          head_cam_right: (1, n_obs_steps, 3, 240, 320)
+          agent_pos:      (1, n_obs_steps, 32)2
+      - action predicted: (1, T, 32)
+      - layout = [waist(3), left_arm(7), right_arm(7), inspire_hand(6), kistar_hand(9)] => 32
+        which corresponds to hand_mode = reduced_v3 in this repo.
+    """
+
+    def __init__(
+        self,
+        ckpt_path: str,
+        device: str = "cuda",
+        use_ema: bool = True,
+        num_inference_steps: int = 2,
+        denoise_timesteps: int = 2,
+        img_hw=(240, 320),  # (H,W)
+        compile_model: bool = True,
+        expected_layout: str = "inspire_kistar_reduced_v3",
+    ):
+        if dill is None or OmegaConf is None:
+            raise ImportError(
+                "ManiFlow adapter needs dill + omegaconf installed in this env. "
+                "Try: pip install dill omegaconf hydra-core"
+            )
+
+        self.ckpt_path = ckpt_path
+        self.device = device if (device != "cuda" or torch.cuda.is_available()) else "cpu"
+        self.use_ema = use_ema
+        self.num_inference_steps = num_inference_steps
+        self.denoise_timesteps = denoise_timesteps
+        self.H, self.W = img_hw
+        self.expected_layout = expected_layout
+
+        # Reduce CPU noise
+        torch.set_grad_enabled(False)
+        torch.set_num_threads(1)
+        torch.set_num_interop_threads(1)
+
+        if torch.cuda.is_available():
+            torch.backends.cudnn.benchmark = True
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            try:
+                torch.backends.cuda.enable_flash_sdp(True)
+                torch.backends.cuda.enable_mem_efficient_sdp(True)
+                torch.backends.cuda.enable_math_sdp(False)
+            except Exception:
+                pass
+
+        _register_omegaconf_resolvers()
+
+        # ---- load checkpoint payload (your cell 1/2 logic) ----
+        payload = torch.load(self.ckpt_path, map_location="cpu", pickle_module=dill)
+        cfg = payload["cfg"]
+
+        # Lazy import hydra instantiate (keeps import errors clearer)
+        from hydra.utils import instantiate
+
+        student = instantiate(cfg.policy)
+
+        # choose EMA weights by default (your preference)
+        if use_ema and "ema_model" in payload.get("state_dicts", {}):
+            sd = payload["state_dicts"]["ema_model"]
+            self.policy = instantiate(cfg.policy)
+            self.policy.load_state_dict(_strip_module_prefix(sd), strict=True)
+            print("[ManiFlow] Loaded EMA weights: state_dicts['ema_model']")
+        else:
+            sd = payload["state_dicts"]["model"]
+            self.policy = student
+            self.policy.load_state_dict(_strip_module_prefix(sd), strict=True)
+            print("[ManiFlow] Loaded Student weights: state_dicts['model']")
+
+        self.policy.to(self.device)
+        self.policy.eval()
+
+        # set diffusion inference steps to your fast setting
+        if hasattr(self.policy, "num_inference_steps"):
+            self.policy.num_inference_steps = num_inference_steps
+        if hasattr(self.policy, "denoise_timesteps"):
+            self.policy.denoise_timesteps = denoise_timesteps
+
+        # ----- (NEW 0210): make normalizer attachment "fail-fast" -----
+        # ---- normalizer (critical!) ----
+        # Your checkpoints contain the normalizer buffers inside the model state_dict
+        # (e.g. keys like `normalizer.params_dict.*`), so load_state_dict() already
+        # restores correct normalization. Do NOT try to instantiate the dataset here.
+        norm_keys = [k for k in sd.keys() if "normalizer" in k.lower()]
+        if not norm_keys:
+            raise RuntimeError(
+                "[DEPLOY][FATAL] Checkpoint state_dict has no normalizer.* keys. "
+                "Refusing to run ManiFlow without correct normalization."
+            )
+
+        if (not hasattr(self.policy, "normalizer")) or (self.policy.normalizer is None):
+            raise RuntimeError(
+                "[DEPLOY][FATAL] ManiFlow policy has no `.normalizer` (or it is None) even though the checkpoint "
+                "contains normalizer keys. Check ManiFlowTransformerImagePolicy defines `self.normalizer` and that "
+                "state_dict names match."
+            )
+
+        print(f"[ManiFlow] Using normalizer from checkpoint (loaded via load_state_dict). normalizer_keys={len(norm_keys)}")
+        # ----- (END 0210): make normalizer attachment "fail-fast" -----
+
+        # n_obs_steps is needed for buffering
+        self.n_obs_steps = int(getattr(self.policy, "n_obs_steps", 2))
+
+        # --- rolling buffers updated at 20Hz ---
+        self._imgL = deque(maxlen=self.n_obs_steps)   # each: (3,H,W) float16 in [0,1]
+        self._imgR = deque(maxlen=self.n_obs_steps)
+        self._state = deque(maxlen=self.n_obs_steps)  # each: (32,) float32
+
+        # --- optional torch.compile (your cell 6.9/7 idea) ---
+        if compile_model and hasattr(torch, "compile"):
+            try:
+                if hasattr(self.policy, "model"):
+                    self.policy.model = torch.compile(self.policy.model, mode="reduce-overhead", fullgraph=False)
+                    print("[ManiFlow] torch.compile(policy.model) ok")
+                if hasattr(self.policy, "obs_encoder"):
+                    self.policy.obs_encoder = torch.compile(self.policy.obs_encoder, mode="reduce-overhead", fullgraph=False)
+                    print("[ManiFlow] torch.compile(policy.obs_encoder) ok")
+            except Exception as e:
+                print(f"[ManiFlow][WARN] torch.compile failed (ignored): {repr(e)}")
+
+        # warmup (important for stable latency)
+        self._warmup()
+
+    def _warmup(self):
+        # create dummy obs with fixed shapes so kernels/compile warm up
+        B = 1
+        T = self.n_obs_steps
+        dummy = {
+            "head_cam_left": torch.zeros((B, T, 3, self.H, self.W), device=self.device, dtype=torch.float16),
+            "head_cam_right": torch.zeros((B, T, 3, self.H, self.W), device=self.device, dtype=torch.float16),
+            "agent_pos": torch.zeros((B, T, 32), device=self.device, dtype=torch.float32),
+        }
+        for _ in range(10):
+            _ = self._fast_predict(dummy)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        print("[ManiFlow] Warmup done.")
+
+    def _fast_predict(self, obs_torch: dict):
+        if torch.cuda.is_available() and self.device.startswith("cuda"):
+            amp_ctx = torch.autocast("cuda", dtype=torch.float16)
+        else:
+            amp_ctx = contextlib.nullcontext()
+
+        with torch.inference_mode():
+            with amp_ctx:
+                return self.policy.predict_action(obs_torch)
+
+    @staticmethod
+    def _extract_frame(obs: dict, key_candidates):
+        for k in key_candidates:
+            if k in obs:
+                arr = obs[k]
+                if isinstance(arr, np.ndarray):
+                    if arr.ndim == 5:
+                        return arr[0, 0]  # (H,W,3)
+                    if arr.ndim == 3:
+                        return arr
+        return None
+
+    @staticmethod
+    def _extract_vec(obs: dict, k: str):
+        if k not in obs:
+            return None
+        arr = obs[k]
+        if not isinstance(arr, np.ndarray):
+            return None
+        if arr.ndim == 3:
+            return arr[0, 0].astype(np.float32)
+        if arr.ndim == 1:
+            return arr.astype(np.float32)
+        return None
+
+    def _preprocess_rgb(self, rgb_uint8: np.ndarray):
+        # rgb_uint8: (H,W,3) uint8 RGB
+        img = cv2.resize(rgb_uint8, (self.W, self.H), interpolation=cv2.INTER_AREA)
+        img = img.transpose(2, 0, 1)  # (3,H,W)
+        img = (img.astype(np.float16) / 255.0)
+        return img
+
+    def update_obs(self, obs_gr00t: dict):
+        """
+        Called at 20Hz: store last n_obs_steps frames + state.
+        """
+        if obs_gr00t is None:
+            return
+
+        # Images (ZED bino preferred)
+        frameL = self._extract_frame(obs_gr00t, ["video.ego_left_view", "video.ego_view", "video.rs_view"])
+        frameR = self._extract_frame(obs_gr00t, ["video.ego_right_view"])
+
+        if frameL is None:
+            return
+        if frameR is None:
+            frameR = frameL  # fallback: duplicate
+
+        # State -> agent_pos(32)
+        waist = self._extract_vec(obs_gr00t, "state.waist")
+        la   = self._extract_vec(obs_gr00t, "state.left_arm")
+        ra   = self._extract_vec(obs_gr00t, "state.right_arm")
+
+        # left hand key differs by branch; handle both
+        lh = self._extract_vec(obs_gr00t, "state.inspire_hand")
+        if lh is None:
+            lh = self._extract_vec(obs_gr00t, "state.left_hand")
+
+        kh = self._extract_vec(obs_gr00t, "state.kistar_hand")
+
+        if waist is None or la is None or ra is None or lh is None or kh is None:
+            return
+
+        # If kistar came in as 16D but we expect reduced_v3(9D), reduce it.
+        if self.expected_layout == "inspire_kistar_reduced_v3":
+            if kh.shape[0] == 16:
+                kh = reduce_hand_qpos_v3(kh).astype(np.float32)
+            if kh.shape[0] != 9:
+                # last-resort: try reduced(6) and pad to 9
+                if kh.shape[0] == 6:
+                    kh = np.pad(kh, (0, 3), mode="constant")
+        # build agent_pos in the assumed order
+        agent_pos = np.concatenate([waist, la, ra, lh, kh], axis=0).astype(np.float32)
+
+        # Safety check
+        if agent_pos.shape[0] != 32:
+            # Don’t crash the whole deploy loop; just skip update
+            return
+
+        self._imgL.append(self._preprocess_rgb(frameL))
+        self._imgR.append(self._preprocess_rgb(frameR))
+        self._state.append(agent_pos)
+
+    def _pad_seq(self, dq: deque, n: int):
+        if len(dq) == 0:
+            return None
+        if len(dq) >= n:
+            return list(dq)[-n:]
+        first = dq[0]
+        return [first] * (n - len(dq)) + list(dq)
+
+    def get_action(self, obs_gr00t: dict):
+        """
+        Called only when the deploy buffer needs refill.
+        Returns a GR00T-style action dict with shape (1, T, dim) numpy arrays.
+        """
+        # If we never received updates (e.g., first call), try updating once
+        if len(self._state) == 0:
+            self.update_obs(obs_gr00t)
+
+        imgsL = self._pad_seq(self._imgL, self.n_obs_steps)
+        imgsR = self._pad_seq(self._imgR, self.n_obs_steps)
+        states = self._pad_seq(self._state, self.n_obs_steps)
+
+        if imgsL is None or imgsR is None or states is None:
+            print(f"[DEBUG] imgsL: {imgsL is None}")
+            print(f"[DEBUG] imgsR: {imgsR is None}")
+            print(f"[DEBUG] states: {states is None}")
+            raise RuntimeError("[ManiFlow] No observation history available yet.")
+
+        # Stack -> (1, T, ...)
+        head_cam_left = torch.from_numpy(np.stack(imgsL, axis=0)).unsqueeze(0).to(self.device, non_blocking=True)
+        head_cam_right = torch.from_numpy(np.stack(imgsR, axis=0)).unsqueeze(0).to(self.device, non_blocking=True)
+        agent_pos = torch.from_numpy(np.stack(states, axis=0)).unsqueeze(0).to(self.device, non_blocking=True)
+
+        obs_mf = {
+            "head_cam_left": head_cam_left,     # (1, T, 3, H, W)
+            "head_cam_right": head_cam_right,   # (1, T, 3, H, W)
+            "agent_pos": agent_pos,             # (1, T, 32)
+        }
+
+        out = self._fast_predict(obs_mf)
+        a = out["action"] if isinstance(out, dict) and "action" in out else out
+        a = a.detach().float().cpu().numpy()  # (1, Tpred, 32)
+
+        # Split action layout
+        waist = a[:, :, 0:3]
+        left_arm = a[:, :, 3:10]
+        right_arm = a[:, :, 10:17]
+        inspire_hand = a[:, :, 17:23]
+        kistar_hand = a[:, :, 23:32]  # 9D (reduced_v3)
+
+        return {
+            "action.waist": waist,
+            "action.left_arm": left_arm,
+            "action.right_arm": right_arm,
+            "action.inspire_hand": inspire_hand,
+            "action.kistar_hand": kistar_hand,
+        }
+# ----- (END 0209): maniflow policy adapter -----
+
 
 def process_frame(frame, side=""):
     """하나의 프레임을 검증하고 전처리한 뒤 uint8 RGB 이미지로 반환합니다."""
@@ -154,17 +520,18 @@ def process_frame(frame, side=""):
 
     return img_rgb.astype(np.uint8)
 
+# ----- (NEW 0210): new init groot using lazy import (since maniflow doesn't need gr00t) -----
 def init_gr00t_policy(model_path, embodiment_tag, modality_config, modality_transform, denoising_steps, device):
-    policy = Gr00tPolicy(
+    _, _Gr00tPolicy = _lazy_import_gr00t()
+
+    policy = _Gr00tPolicy(
         model_path=model_path,
-        embodiment_tag=embodiment_tag,
         modality_config=modality_config,
         modality_transform=modality_transform,
-        denoising_steps=denoising_steps,
-        device=device,
+        embodiment_tag=embodiment_tag,
     )
     return policy
-
+# ----- (END 0210): new init groot using lazy import (since maniflow doesn't need gr00t) -----
 
 def reduce_hand_qpos(hand_qpos_16d):
     
@@ -300,22 +667,7 @@ def obs_dict_realsense(gr00t_task_name, qpos, hand_qpos, rgb, hand_deploy_mode =
                     "state.right_hand": right_hand_np,
                     "annotation.human.action.task_description": annotation_np,
                 }
-    
-    elif hand_deploy_mode == "kistar_only":
-        right_hand = hand_qpos[0:16]
-        right_hand_np = right_hand[np.newaxis, np.newaxis, ...]
         
-        left_arm_np6 = left_arm_np[..., :6]   # (1,1,6)
-
-        obs = {
-                "video.ego_view": video_np,
-                "state.waist": waist_np,
-                "state.left_arm": left_arm_np6,
-                "state.right_arm": right_arm_np,
-                "state.kistar_hand": right_hand_np,
-                "annotation.human.action.task_description": annotation_np,
-            }
-                
     return obs
 
 # 특징: zed_left, zed_right 비디오, head 상태, kistar_hand(16차원) 포함
@@ -329,13 +681,15 @@ def obs_dict_zed(gr00t_task_name, qpos, hand_qpos, rgb_left, rgb_right, hand_dep
     waist      = qpos[:3]
     left_arm   = qpos[5:12]
     right_arm  = qpos[12:19]
-    
+
     waist_np      = waist[np.newaxis, np.newaxis, ...]     # (1, 1, 3)
     left_arm_np   = left_arm[np.newaxis, np.newaxis, ...]  # (1, 1, 7)
     right_arm_np  = right_arm[np.newaxis, np.newaxis, ...] # (1, 1, 7)
-##head
+
+    # ----- (NEW 0211): head obs for PCA -----
     head = np.zeros(2, dtype=np.float32)
     head_np = head[np.newaxis, np.newaxis, ...]
+    # ----- (END 0211): head obs for PCA -----
 
     # Annotation(문자열)도 numpy array로 변환
     task_name     = gr00t_task_name                        # str
@@ -398,7 +752,8 @@ def obs_dict_zed(gr00t_task_name, qpos, hand_qpos, rgb_left, rgb_right, hand_dep
                     "state.kistar_hand": right_hand_np,
                     "annotation.human.action.task_description": annotation_np,
                 }            
-        
+            
+        # ----- (NEW 0211): proprioceptive state for left/right hand PCA -----
         elif hand_deploy_mode == "inspire_kistar_pca":
             # 왼손(inspire) 6D 그대로
             left_hand = hand_qpos[0:6]
@@ -420,6 +775,23 @@ def obs_dict_zed(gr00t_task_name, qpos, hand_qpos, rgb_left, rgb_right, hand_dep
                     "state.right_hand_pca": right_hand_np,  # ✅ 7D
                     "annotation.human.action.task_description": annotation_np,
                 }
+            print(f"[DEBUG] obs: {obs}")
+        # ----- (END 0211): proprioceptive state for left/right hand PCA -----
+        
+        
+        elif hand_deploy_mode == "kistar_only":
+            right_hand = hand_qpos[0:16]
+            right_hand_np = right_hand[np.newaxis, np.newaxis, ...]
+            
+            obs = {
+                    "video.ego_view": video_np,
+                    "state.waist": waist_np,
+                    "state.left_arm": left_arm_np,
+                    "state.right_arm": right_arm_np,
+                    "state.kistar_hand": right_hand_np,
+                    "annotation.human.action.task_description": annotation_np,
+                }
+
 
 
         elif hand_deploy_mode == "kistar_only_full":
@@ -467,30 +839,8 @@ def obs_dict_zed(gr00t_task_name, qpos, hand_qpos, rgb_left, rgb_right, hand_dep
                     "state.right_hand": right_hand_np,
                     "annotation.human.action.task_description": annotation_np,
                 }
-                  
-                  
-        elif hand_deploy_mode == "kistar_only":
-            if hand_qpos.shape[0] == 16:
-                right_hand = hand_qpos
-            else:
-                right_hand = hand_qpos[-16:]  # 마지막 16개를 kistar로 가정
-
-            right_hand = right_hand.astype(np.float32)
-            right_hand_np = right_hand[np.newaxis, np.newaxis, ...]
-            left_arm_np6 = left_arm_np[..., :6]
-            obs = {
-                "video.ego_left_view": video_left_np,
-                "video.ego_right_view": video_right_np,
-                "state.waist": waist_np,
-                "state.left_arm": left_arm_np6,
-                "state.right_arm": right_arm_np,
-                "state.kistar_hand": right_hand_np,
-                "annotation.human.action.task_description": annotation_np,
-                            }
-
+                
         return obs
-
-        
 
     ## 단안 모드 
     else:
@@ -621,9 +971,6 @@ def expand_hand_action_v3(hand_action_6d):
     expanded_action[14:16] = ring_flexion * (5/11)
 
     return expanded_action
-
-
-
         
 def action_to_array(action, i, hand_deploy_mode = "inspire_kistar_full"):
     waist      = action['action.waist'][0, i]      # shape (3,)
@@ -672,15 +1019,17 @@ def action_to_array(action, i, hand_deploy_mode = "inspire_kistar_full"):
         hand_action_np[:6] = left_hand
         hand_action_np[12:] = right_hand
         
-    elif hand_deploy_mode == "kistar_only":
-        right_hand = action['action.kistar_hand'][0, i]  # (16,)
+    elif hand_deploy_mode=="inspire_kistar_reduced":
 
-    
-        hand_action_np = np.zeros(28, dtype=np.float64)
-        hand_action_np[12:] = right_hand  # 오른손만 채움
+        left_hand = action['action.inspire_hand'][0, i] # shape (6,)
+        right_hand = action['action.kistar_hand'][0, i] # shape (6,)
 
-  
-
+        right_hand_np = expand_hand_action(right_hand)
+        
+        left_hand_np = np.zeros(12, dtype=np.float64)
+        left_hand_np[:6] = left_hand
+        
+        hand_action_np=np.concatenate((left_hand_np,right_hand_np))
         
     elif hand_deploy_mode=="inspire_kistar_reduced_v3":
         left_hand = action['action.inspire_hand'][0, i] # shape (6,)
@@ -694,6 +1043,7 @@ def action_to_array(action, i, hand_deploy_mode = "inspire_kistar_full"):
         
         hand_action_np=np.concatenate((left_hand_np,right_hand_np))
 
+    # ----- (NEW 0211): action mapping for PCA -----
     elif hand_deploy_mode=="inspire_kistar_pca":
         left_hand = action['action.left_hand'][0, i]   # (6,)
         s7 = action["action.right_hand_pca"][0, i]           # (7,)  synergy
@@ -703,13 +1053,14 @@ def action_to_array(action, i, hand_deploy_mode = "inspire_kistar_full"):
         hand_action_np = np.zeros(28, dtype=np.float64)
         hand_action_np[:6] = left_hand
         hand_action_np[12:] = right_hand_np
-     
-    elif hand_deploy_mode=="kistar_only":
+    # ----- (END 0211): action mapping for PCA -----
+
+    elif hand_deploy_mode=="kistar_only":  
         right_hand = action['action.kistar_hand'][0, i] # shape (16,)
 
-        hand_action_np = np.zeros(16, dtype=np.float64)
-        hand_action_np[:] = right_hand
-        right_hand_np = right_hand
+        hand_action_np = np.zeros(28, dtype=np.float64)
+        hand_action_np[12:] = right_hand
+
     return action_np, hand_action_np
 
 def temporal_ensemble_action(action_buffer, decay=0.3, window_size=5):
@@ -748,7 +1099,6 @@ def temporal_ensemble_action(action_buffer, decay=0.3, window_size=5):
     action_buffer.pop(0)
 
     return action_np, hand_action_np
-
 
 def moving_average_action(action_buffer, history):
     """
@@ -821,19 +1171,21 @@ class Gr00t_Inference:
         elif mode=="gr00t_kistar":                        
             if hand_mode=="full":
                 self.hand_deploy_mode="kistar_only_full"          
-            elif hand_mode=="reduced":        
-                self.hand_deploy_mode="kistar_only_reduced"   
-            elif hand_mode == "kistar_only":
-                self.hand_deploy_mode="kistar_only"   
+            elif hand_mode == "reduced":                
+                self.hand_deploy_mode="kistar_only_reduced"       
+            else:                
+                self.hand_deploy_mode="kistar_only"     
 
-        
+
         elif mode=="gr00t_kistar_inspire":            
             if hand_mode=="full":
                 self.hand_deploy_mode="inspire_kistar_full"
             elif hand_mode=="reduced_v3":                
-                self.hand_deploy_mode="inspire_kistar_reduced_v3"
+                self.hand_deploy_mode="inspire_kistar_reduced_v3"       
+            # ----- (NEW 0211): add hand mode for PCA -----
             elif hand_mode=="reduced_pca":  
                 self.hand_deploy_mode="inspire_kistar_pca"     
+            # ----- (NEW 0211): add hand mode for PCA -----
             else:                
                 self.hand_deploy_mode="inspire_kistar_reduced"            
         
@@ -876,58 +1228,32 @@ class Gr00t_Inference:
             self.debug_dir.mkdir(parents=True, exist_ok=True)
             print(f"[DEBUG] Debug images will be saved to: {self.debug_dir}")
 
-        # 현재 로봇 몸체 세팅과 동일한 모델을 넣어야합니다. 여러 모델을 조건별로 하려면 아래 if문을 참고해주세요.
-        self.model_path = "/media/ansur/684845314844FEF6/parkcju/0206_apple_pickup_kistar_only/checkpoint-200000/"
-        
-        # Data config도 학습때 사용한 것 과 동일한 것을 넣어야합니다
-        self.data_config = DATA_CONFIG_MAP["unitree_g1_kistar_only"]
+        # ----- (NEW 0210): wrap all all Gr00t-specific setup to only happen for Gr00t policy-----
+        self.modality_config = None
+        self.modality_transform = None
+        self.data_config = None
+        self.model_path = None
+        self.embodiment_tag = None
+        self.denoising_steps = None
 
+        if self.policy_name in ("gr00t", "act"):
+            DATA_CONFIG_MAP, _ = _lazy_import_gr00t()
 
-        # if self.zed_mode:
-        #     if self.binocular:
-        #         if self.hand_deploy_mode == "inspire_kistar_full":
-        #             self.model_path = "/home/ansur/Isaac-GR00T/checkpoints/1025_1027_pick_and_place_apple_bino/checkpoint-100000/"
-        #         elif self.hand_deploy_mode == "inspire_kistar_reduced":
-        #             self.model_path = "/home/ansur/Isaac-GR00T/checkpoints/1125_pick_and_place_bino/checkpoint-100000/"
-        #         elif self.hand_deploy_mode == "inspire_kistar_reduced_v3":
-        #             print("Check BBB")        
-        #             self.model_path = "/media/ansur/684845314844FEF6/shheo/0116_bimanual/0116_glue_bimanual/checkpoint-200000/"
-        #         else:
-        #             raise ValueError(f"Invalid hand deploy mode: {self.hand_deploy_mode}")
-        #     else:
-        #         if self.hand_deploy_mode == "inspire_kistar_full":
-        #             self.model_path = "/home/ansur/Isaac-GR00T/checkpoints/gr00t_zed_weight/checkpoint-100000/"
-        #         elif self.hand_deploy_mode == "inspire_kistar_reduced":
-        #             self.model_path = "/home/ansur/Isaac-GR00T/checkpoints/1125_pick_and_place_mono/checkpoint-100000/"
-        #         else:
-        #             raise ValueError(f"Invalid hand deploy mode: {self.hand_deploy_mode}")
+            self.model_path = os.getenv("GR00T_MODEL_PATH", "/home/kist/.../vla_Jan05_v2")  # keep yours
+            self.data_config = DATA_CONFIG_MAP["unitree_g1_inspire_kistar"]
+            self.embodiment_tag = 'new_embodiment'
 
-        # else:
-        #     if self.hand_deploy_mode == "inspire_kistar_full":
-        #         self.model_path = "/home/ansur/Isaac-GR00T/checkpoints/1016_masked/checkpoint-20000"
-        #     elif self.hand_deploy_mode == "inspire_kistar_reduced":
-        #         self.model_path = "/home/ansur/Isaac-GR00T/checkpoints/1016_masked/checkpoint-20000"
-        #     else:
-        #         raise ValueError(f"Invalid hand deploy mode: {self.hand_deploy_mode}")
-        #     self.model_path = "/home/ansur/Isaac-GR00T/checkpoints/1016_masked/checkpoint-20000"
+            self.modality_config = self.data_config.modality_config()
+            self.modality_transform = self.data_config.transform()
+            self.denoising_steps = 4
 
-        # if self.zed_mode:
-        #     if self.binocular:
-        #         self.data_config = DATA_CONFIG_MAP["unitree_g1_kistar_zed"]
-        #     else:
-        #         self.data_config = DATA_CONFIG_MAP["unitree_g1_kistar_zed_mono"]
+        elif self.policy_name == "maniflow":
+            # Do nothing here — ManiFlowPolicyAdapter handles its own preproc.
+            pass
+        else:
+            raise ValueError(f"Unknown policy: {self.policy_name}")
 
-        # else:
-        #     self.data_config = DATA_CONFIG_MAP["unitree_g1_kistar_realsense"]
-        
-        ###################
-
-        self.embodiment_tag = "new_embodiment"
-        
-        self.denoising_steps = 4
-
-        self.modality_config = self.data_config.modality_config()
-        self.modality_transform = self.data_config.transform()
+        # ----- (END 0210): wrap all all Gr00t-specific setup to only happen for Gr00t policy-----
 
         self.policy = None
         self.gr00t_task_name = ""
@@ -957,6 +1283,59 @@ class Gr00t_Inference:
         self._fast_thread = threading.Thread(target=self._ctrl_loop, name=f"{self.fast_hz}HzLoop")
         self._fast_thread.daemon = True
         self._fast_thread.start()
+
+    # ----- (NEW 0210): compute replan threshold from measured inference latency -----
+    def _compute_replan_threshold(self, buf_len: int) -> int:
+        if buf_len <= 0:
+            return 0
+
+        # If we don't have a measurement yet, keep legacy behavior (half).
+        if not self.infer_times:
+            return max(0, int(buf_len // 2))
+
+        infer_s = float(self.avg_infer_ms) / 1000.0
+        slow_tick_s = 1.0 / float(self.slow_hz)
+
+        margin_s = 0.03  # jitter margin
+        need_s = infer_s + slow_tick_s + margin_s
+
+        need_steps = int(math.ceil(need_s * self.fast_hz))
+        min_steps = int(math.ceil(0.15 * self.fast_hz))  # keep at least 150ms
+
+        remain_steps = max(need_steps, min_steps)
+        thr = max(0, buf_len - remain_steps)
+        return int(min(thr, buf_len - 1))
+    # ----- (END 0210): compute replan threshold from measured inference latency -----
+
+    # ----- (NEW 0209): make new initializer method for maniflow -----
+    def _init_maniflow_policy(self):
+        ckpt = os.environ.get("MANIFLOW_CKPT", "")
+        if not ckpt:
+            raise ValueError("Set MANIFLOW_CKPT=/path/to/latest.ckpt before running deploy_gr00t.py")
+
+        use_ema = os.environ.get("MANIFLOW_USE_EMA", "1") == "1"
+        compile_ok = os.environ.get("MANIFLOW_COMPILE", "1") == "1"
+        steps = int(os.environ.get("MANIFLOW_STEPS", "2"))
+
+        # This matches your assumption that this run is reduced_v3 => action dim 32
+        self.policy = ManiFlowPolicyAdapter(
+            ckpt_path=ckpt,
+            device=self.device,
+            use_ema=use_ema,
+            num_inference_steps=steps,
+            denoise_timesteps=steps,
+            img_hw=(240, 320),
+            compile_model=compile_ok,
+            expected_layout="inspire_kistar_reduced_v3",
+        )
+
+        # Keep the buffering fields the same as GR00T
+        self.primary_buffer = []
+        self.secondary_buffer = []
+        self.buffer_threshold = 8
+
+        print("[DEPLOY] ManiFlow policy loaded successfully")
+    # ----- (END 0209): make new initializer method for maniflow -----
 
     def _init_gr00t_policy(self):
 
@@ -1094,48 +1473,31 @@ class Gr00t_Inference:
         self.act_buf.clear()
         self.infer_start_times.clear()
         self.infer_end_times.clear()
+
     def write_shm(self):
-        action_waist = self.action_np[:3]
-        action_head  = self.action_np[3:5]
-
-        # arm 14개로 복원
-        arm_slice = self.action_np[5:19]
-        if arm_slice.size == 13:
-            left_arm7_current = self.qpos[5:12].astype(np.float32)  # (7,)
-
-            left6  = arm_slice[:6] # policy 출력값
-            right7 = arm_slice[6:]  # (7,)
-
-            left7 = left_arm7_current.copy()
-            left7[:6] = left6       # (앞 6개를 policy로, 마지막 1개는 hold)
-
-            action_arm = np.concatenate([left7, right7], axis=0)  # (14,)
-        else:
-            action_arm = arm_slice  # 이미 14면 그대로
-
-       
         self.robot_action_shm.write_data(
-            action_waist=action_waist,
-            action_head=action_head,
-            action_arm=action_arm,                 
-            action_hand=self.hand_action_np[:12],
+            action_waist=self.action_np[:3],
+            action_head = self.action_np[3:5],
+            action_arm=self.action_np[5:19],      
+            action_hand=self.hand_action_np[:12]             
         )
 
         self.kistar_hand_action_shm.write_data(
-            hand_action=self.hand_action_np[12:]
+            hand_action = self.hand_action_np[12:]
         )
 
-    # def write_shm(self):
-    #     self.robot_action_shm.write_data(
-    #         action_waist=self.action_np[:3],
-    #         action_head = self.action_np[3:5],
-    #         action_arm=self.action_np[5:19],      
-    #         action_hand=self.hand_action_np[:12]             
-    #     )
+    
+    self.robot_action_shm.write_data(
+        action_waist=action_waist,
+        action_head=action_head,
+        action_arm=action_arm,
+        action_hand=self.hand_action_np[:12],
+    )
 
-    #     self.kistar_hand_action_shm.write_data(
-    #         hand_action = self.hand_action_np[12:]
-    #     )
+    self.kistar_hand_action_shm.write_data(
+        hand_action=self.hand_action_np[12:]
+    )
+
 
     def get_real_obs(self):
         img_dict   = self.camera_shm.read_data()
@@ -1280,6 +1642,18 @@ class Gr00t_Inference:
 
         with self.obs_lock:
             obs = self.obs  
+        
+        # ----- (NEW 0209): Call policy.update_obs(obs) every 20Hz -----
+        if obs is None:
+            return
+
+        # NEW: keep ManiFlow obs history updated at 20Hz
+        if hasattr(self.policy, "update_obs"):
+            try:
+                self.policy.update_obs(obs)
+            except Exception as e:
+                print(f"[DEPLOY][WARN] policy.update_obs failed: {e}")
+        # ----- (END 0209): Call policy.update_obs(obs) every 20Hz -----
                                   # 버퍼의 절반 정도가 소진되면 미래 예측을 위해 새 추론 실행 
         if  self.primary_index >= self.buffer_threshold:
             # 인퍼런스 전 상태 저장
@@ -1407,7 +1781,11 @@ class Gr00t_Inference:
                         if self.policy_name == "gr00t":
                             self._init_gr00t_policy()
                         elif self.policy_name == "act":
-                            self._init_act_policy()                        
+                            self._init_act_policy()      
+                        # ----- (NEW 0209): add maniflow initialization branch -----
+                        elif self.policy_name == "maniflow":
+                            self._init_maniflow_policy()
+                        # ----- (END 0209): add maniflow initialization branch -----
                     else:
                         self.do_slow()  # 20 Hz 작업
 
@@ -1449,7 +1827,8 @@ class Gr00t_Inference:
     # ────────────── 실제 작업 (오버라이드/콜백용) ──────────────
     def do_slow(self) -> None:
         """20 Hz마다 실행되는 작업 예시."""
-        if self.policy_name == "gr00t":
+        # if self.policy_name == "gr00t":
+        if self.policy_name in ["gr00t", "maniflow"]: # (NEW 0209): include maniflow in slow/fast loops
             self.get_real_obs()
             
             self.gr00t_inference()
@@ -1462,7 +1841,8 @@ class Gr00t_Inference:
 
     def do_fast(self) -> None:
         """50 Hz마다 실행되는 작업 예시."""
-        if self.policy_name == "gr00t":
+        # if self.policy_name == "gr00t":
+        if self.policy_name in ["gr00t", "maniflow"]: # (NEW 0209): include maniflow in slow/fast loops
             if self.start_loop : 
                 self.get_action()
                 self.write_shm()

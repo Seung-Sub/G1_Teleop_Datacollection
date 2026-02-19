@@ -101,10 +101,9 @@ class G1CtrlWorker(DualRateWorker):
             if self._shared_event['set_g1'].is_set() and not self.g1_initialized:
                 logger_mp.info("[G1_Ctrl] Initializing G1/DXL...")
                 try:
-                    
                     self.g1_ctrl = G1_29_ArmController(self.mode)
-                    self.d_ctrl  = Dynamixel_Controller()
-                    
+                    self.d_ctrl = Dynamixel_Controller()                    
+
                     self.g1_ctrl.speed_gradual_max()
                     self.g1_initialized = True
                     logger_mp.info("[G1_Ctrl] G1/DXL initialized.")

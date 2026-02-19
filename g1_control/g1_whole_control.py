@@ -56,7 +56,6 @@ class G1_29_ArmController:
             cfg = yaml.safe_load(f)
 
         prof = cfg["modes"][self.mode]  # "base" 또는 "amo"
-
         self.kp  = np.array(prof["kp"], dtype=np.float32)
         self.kd  = np.array(prof["kd"], dtype=np.float32)
         self.default_dof_pos = np.array(prof["default_dof_pos"], dtype=np.float32)
@@ -82,6 +81,7 @@ class G1_29_ArmController:
         self._speed_gradual_max = False
         self._gradual_start_time = None
         self._gradual_time = None
+
 
         # initialize lowcmd publisher and lowstate subscriber
         cfg = yaml.safe_load(open("utils/lan_config.yaml"))
@@ -109,15 +109,16 @@ class G1_29_ArmController:
         self.msg.mode_pr = 0
         self.msg.mode_machine = self.get_mode_machine()
 
+
         self.zero_torque_state()
         self.move_to_default_pos()
         self.default_pos_state()
+
 
         self.publish_thread = threading.Thread(target=self._ctrl_motor_state)
         self.ctrl_lock = threading.Lock()
         self.publish_thread.daemon = True
         self.publish_thread.start()
-
 
         logger_mp.info("Initialize G1_29_ArmController OK!\n")
 

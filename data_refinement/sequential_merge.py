@@ -58,19 +58,16 @@ def backup_original_data(source_path: Path):
 
 def sequential_merge():
     """모든 데이터를 보존하면서 순차적으로 병합합니다."""
-    base_dir = Path("/home/ansur/Ansur_unitree_teleop/record")
+    base_dir = Path("/home/ansur/G1_teleoperation/record")
     
     # --- 병합할 데이터셋 목록 ---
     # 여기서 원하는 데이터셋 폴더 이름을 순서대로 나열합니다.
     # 첫 번째 데이터셋이 병합의 기준(primary)이 됩니다.
     dataset_names = [
-        # "downglue_J",
-        # "downglue_J_1",
-        # "downglue_p_1",
-        "standglue_J",
-        "standglue_J_2",
-        "standglue_p_3",
-        "standglue_p_4",
+         "apple_sihwan",
+         "apple_sihwan_2",
+        "apple_sihwan_3",
+        
     ]
     # -------------------------
 
@@ -81,7 +78,7 @@ def sequential_merge():
         return None
 
     # 새로운 병합 폴더 생성
-    merged_folder_name = "0116_glue_bimanual_stand"
+    merged_folder_name = "0207_apple_pickup_"
     primary_path = base_dir / merged_folder_name
     
     # 기존 병합 폴더가 있으면 백업

@@ -71,45 +71,120 @@ except Exception:
 #     "right_ring_joint_0", "right_ring_joint_1", "right_ring_joint_2"
 # ]
 
-STATE_NAMES = [
-    # Waist (3개)
+# STATE_NAMES = [
+#     # Waist (3개)
+#     "waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint",
+#     # Left arm (7개)
+#     "left_shoulder_pitch_joint", "left_shoulder_roll_joint", "left_shoulder_yaw_joint",
+#     "left_elbow_joint", "left_wrist_roll_joint", "left_wrist_pitch_joint", "left_wrist_yaw_joint",
+#     # Right arm (7개)
+#     "right_shoulder_pitch_joint", "right_shoulder_roll_joint", "right_shoulder_yaw_joint",
+#     "right_elbow_joint", "right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint",
+#     # Left inspire hand (6개)
+#     "L_pinky_proximal_joint","L_ring_proximal_joint","L_middle_proximal_joint","L_index_proximal_joint",
+#     "L_thumb_proximal_pitch_joint","L_thumb_proximal_yaw_joint",
+#     # Kistar hand (9개) - 오른손만, 엄지 4자유도, 손가락 MCP flexion 1자유도, PIP-DIP flexion 1자유도
+#     "right_thumb_joint_0", "right_thumb_joint_1", "right_thumb_joint_2", "right_thumb_joint_3",
+#     "right_index_joint_1", "right_index_flexion", 
+#     "right_middle_joint_1", "right_middle_flexion",
+#     "right_ring_joint_1"
+# ]
+
+# # # Action용 관절 이름 (32개 - Head 제거, right_ring_joint_3 제거)
+# ACTION_NAMES = [
+#     # Waist (3개)
+#     "waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint",
+#     # Left arm (7개)
+#     "left_shoulder_pitch_joint", "left_shoulder_roll_joint", "left_shoulder_yaw_joint",
+#     "left_elbow_joint", "left_wrist_roll_joint", "left_wrist_pitch_joint", "left_wrist_yaw_joint",
+#     # Right arm (7개)
+#     "right_shoulder_pitch_joint", "right_shoulder_roll_joint", "right_shoulder_yaw_joint",
+#     "right_elbow_joint", "right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint",
+#     # Left inspire hand (6개)
+#     "L_pinky_proximal_joint","L_ring_proximal_joint","L_middle_proximal_joint","L_index_proximal_joint",
+#     "L_thumb_proximal_pitch_joint","L_thumb_proximal_yaw_joint",
+#     # Kistar hand (10개) - 오른손만, 엄지 4자유도, 손가락 MCP flexion 1자유도, PIP-DIP flexion 1자유도
+#     "right_thumb_joint_0", "right_thumb_joint_1", "right_thumb_joint_2", "right_thumb_joint_3",
+#     "right_index_joint_1", "right_index_flexion", 
+#     "right_middle_joint_1", "right_middle_flexion",
+#     "right_ring_joint_1"
+# ]
+
+
+# 32D = (Head 2) + (waist 3) + (left arm 7) + (right arm 7) + (left hand 6) + (right hand PCA 7)
+
+BASE_25_NAMES = [
+    # Waist (3)
     "waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint",
-    # Left arm (7개)
+
+     # Head (2) 
+     "camera_yaw_joint", "camera_pitch_joint",
+
+    # Left arm (7)
     "left_shoulder_pitch_joint", "left_shoulder_roll_joint", "left_shoulder_yaw_joint",
     "left_elbow_joint", "left_wrist_roll_joint", "left_wrist_pitch_joint", "left_wrist_yaw_joint",
-    # Right arm (7개)
+
+    # Right arm (7)
     "right_shoulder_pitch_joint", "right_shoulder_roll_joint", "right_shoulder_yaw_joint",
     "right_elbow_joint", "right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint",
-    # Left inspire hand (6개)
-    "L_pinky_proximal_joint","L_ring_proximal_joint","L_middle_proximal_joint","L_index_proximal_joint",
-    "L_thumb_proximal_pitch_joint","L_thumb_proximal_yaw_joint",
-    # Kistar hand (16개) - 오른손만, 엄지 4자유도, 손가락 MCP flexion 1자유도, PIP-DIP flexion 1자유도
-    "right_thumb_joint_0", "right_thumb_joint_1", "right_thumb_joint_2", "right_thumb_joint_3",
-    "right_index_joint_1", "right_index_flexion", 
-    "right_middle_joint_1", "right_middle_flexion",
-    "right_ring_joint_1", "right_ring_flexion"
+
+    # Left inspire hand (6)
+    "L_pinky_proximal_joint", "L_ring_proximal_joint", "L_middle_proximal_joint", "L_index_proximal_joint",
+    "L_thumb_proximal_pitch_joint", "L_thumb_proximal_yaw_joint",
 ]
 
-# Action용 관절 이름 (32개 - Head 제거, right_ring_joint_3 제거)
-ACTION_NAMES = [
-    # Waist (3개)
-    "waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint",
-    # Left arm (7개)
-    "left_shoulder_pitch_joint", "left_shoulder_roll_joint", "left_shoulder_yaw_joint",
-    "left_elbow_joint", "left_wrist_roll_joint", "left_wrist_pitch_joint", "left_wrist_yaw_joint",
-    # Right arm (7개)
-    "right_shoulder_pitch_joint", "right_shoulder_roll_joint", "right_shoulder_yaw_joint",
-    "right_elbow_joint", "right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint",
-    # Left inspire hand (6개)
-    "L_pinky_proximal_joint","L_ring_proximal_joint","L_middle_proximal_joint","L_index_proximal_joint",
-    "L_thumb_proximal_pitch_joint","L_thumb_proximal_yaw_joint",
-    # Kistar hand (16개) - 오른손만, 엄지 4자유도, 손가락 MCP flexion 1자유도, PIP-DIP flexion 1자유도
-    "right_thumb_joint_0", "right_thumb_joint_1", "right_thumb_joint_2", "right_thumb_joint_3",
-    "right_index_joint_1", "right_index_flexion", 
-    "right_middle_joint_1", "right_middle_flexion",
-    "right_ring_joint_1", "right_ring_flexion"
+# 오른손은 더 이상 16개 관절각이 아니라 "PCA 시너지 좌표(7D)"
+RIGHT_HAND_PCA_7_NAMES = [
+    "right_hand_synergy_0",
+    "right_hand_synergy_1",
+    "right_hand_synergy_2",
+    "right_hand_synergy_3",
+    "right_hand_synergy_4",
+    "right_hand_synergy_5",
+    "right_hand_synergy_6",
 ]
 
+# STATE_NAMES / ACTION_NAMES를 32D로 맞추기
+STATE_NAMES  = BASE_25_NAMES + RIGHT_HAND_PCA_7_NAMES
+ACTION_NAMES = BASE_25_NAMES + RIGHT_HAND_PCA_7_NAMES
+
+assert len(STATE_NAMES) == 32, len(STATE_NAMES)
+assert len(ACTION_NAMES) == 32, len(ACTION_NAMES)
+
+# # # State용 관절 이름 (32개)
+# STATE_NAMES = [
+#     # Waist (3개)
+#     "waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint",
+
+#     # Left arm (6개)
+#     "left_shoulder_pitch_joint", "left_shoulder_roll_joint", "left_shoulder_yaw_joint",
+#     "left_elbow_joint", "left_wrist_roll_joint", "left_wrist_pitch_joint",
+#     # Right arm (7개)
+#     "right_shoulder_pitch_joint", "right_shoulder_roll_joint", "right_shoulder_yaw_joint",
+#     "right_elbow_joint", "right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint",
+#     # Kistar hand (16개) - 오른손만, 4개 손가락 × 4개 관절
+#     "right_thumb_joint_0", "right_thumb_joint_1", "right_thumb_joint_2", "right_thumb_joint_3",
+#     "right_index_joint_0", "right_index_joint_1", "right_index_joint_2", "right_index_joint_3",
+#     "right_middle_joint_0", "right_middle_joint_1", "right_middle_joint_2", "right_middle_joint_3",
+#     "right_ring_joint_0", "right_ring_joint_1", "right_ring_joint_2", "right_ring_joint_3"
+# ]
+
+# # # Action용 관절 이름 (32개 - Head 제거, eft_wrist_yaw_joint 제거)
+# ACTION_NAMES = [
+#     # Waist (3개)
+#     "waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint",
+#     # Left arm (6개)
+#     "left_shoulder_pitch_joint", "left_shoulder_roll_joint", "left_shoulder_yaw_joint",
+#     "left_elbow_joint", "left_wrist_roll_joint", "left_wrist_pitch_joint",
+#     # Right arm (7개)
+#     "right_shoulder_pitch_joint", "right_shoulder_roll_joint", "right_shoulder_yaw_joint",
+#     "right_elbow_joint", "right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint",
+#     # Kistar hand (16개) 
+#     "right_thumb_joint_0", "right_thumb_joint_1", "right_thumb_joint_2", "right_thumb_joint_3",
+#     "right_index_joint_0", "right_index_joint_1", "right_index_joint_2", "right_index_joint_3",
+#     "right_middle_joint_0", "right_middle_joint_1", "right_middle_joint_2", "right_middle_joint_3",
+#     "right_ring_joint_0", "right_ring_joint_1", "right_ring_joint_2", "right_ring_joint_3"
+# ]
 
 # 하위 호환성을 위한 별칭
 STATE_ACTION_NAMES = STATE_NAMES

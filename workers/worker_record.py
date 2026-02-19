@@ -6,13 +6,12 @@ from utils.rate import Rate
 from utils import ParquetSink, VideoSink
 
 from sharedmemory.shmManager import SharedMemoryManager
-from sharedmemory.shm_schema import CAMERA, RECORD_TASK_LAYOUT, RECORD_EPISODE_LAYOUT, RECORD_MODE_LAYOUT, CURRENT_MODE_LAYOUT, WORKER_FREQ, ROBOT_ACTION, ROBOT_OBS, ROBOT_AMO_INPUT, KISTAR_HAND_RECEIVED, KISTAR_HAND_ACTION, WORKSPACE_MASK, MODE_MAPPING
+from sharedmemory.shm_schema import CAMERA, RECORD_TASK_LAYOUT, RECORD_EPISODE_LAYOUT, RECORD_MODE_LAYOUT, CURRENT_MODE_LAYOUT, WORKER_FREQ, ROBOT_ACTION, ROBOT_OBS, ROBOT_AMO_INPUT, KISTAR_HAND_RECEIVED, KISTAR_HAND_ACTION, WORKSPACE_MASK, MODE_MAPPING, MODE_MAPPING_INV
 
 import numpy as np
 import cv2
 
 import glob  
-
 
 import logging_mp
 logger_mp = logging_mp.get_logger(__name__)
@@ -32,7 +31,8 @@ def get_current_mode(current_mode_shm):
     try:
         mode_data = current_mode_shm.read_data()
         mode_int = int(mode_data["mode"].item())
-        current_mode = MODE_MAPPING.get(mode_int, 'teleop')
+        current_mode = MODE_MAPPING_INV.get(mode_int, 'teleop')
+        
         return current_mode
     except Exception as e:
         logger_mp.warning(f"[Record] 모드 정보 읽기 실패: {e}, 기본값 'teleop' 사용")
@@ -91,7 +91,9 @@ def worker_record(shared_event, shm_name, shared_lock):
     kistar_hand_received_shm = None
     kistar_hand_action_shm = None
     if current_mode_shm:
+        logger_mp.info("[Reocord Worker] Read Current Mode!!")
         current_mode = get_current_mode(current_mode_shm)
+        logger_mp.info("[Reocord Worker] Read Current Finish!!")
         if current_mode in ['kistar_teleop', 'kistar_only', 'kistar_inspire_teleop'] and "kistar_hand_received_shm" in shm_name:
             try:
                 kistar_hand_received_shm = SharedMemoryManager(
@@ -306,7 +308,8 @@ def worker_record(shared_event, shm_name, shared_lock):
                 action_arm = robot_action["action_arm"]
                 action = np.concatenate((action_waist,action_head,action_arm))
 
-                # 모드별 손 데이터 처리
+                # 모드별 손 데이터 처리 
+                # logger_mp.info(f"current mode: {current_mode}")
                 if current_mode in ['kistar_teleop', 'kistar_only', 'kistar_inspire_teleop']:
                     # KISTAR 손 모드: KISTAR 데이터 사용 (16개 관절)
                     # Observation: ASUS NUC로부터 받은 현재 상태
@@ -320,6 +323,7 @@ def worker_record(shared_event, shm_name, shared_lock):
                         hand_qpos = np.zeros(16, dtype=np.float32)
 
                     if current_mode=='kistar_inspire_teleop':
+                        logger_mp.info("[Worker Record] kistar inspire teleoperation working !!")
                         obs_hand = robot_obs["obs_hand"]
                         left_hand = obs_hand[:6]
                         
@@ -349,6 +353,7 @@ def worker_record(shared_event, shm_name, shared_lock):
 
                 else:
                     # 일반 모드: Inspire 손 데이터 사용 (12개 관절)
+                    # logger_mp.info("[Worker Record] inspire only teleoperation working !!")
                     obs_hand = robot_obs["obs_hand"]
                     action_hand = robot_action["action_hand"]
                     hand_qpos = obs_hand

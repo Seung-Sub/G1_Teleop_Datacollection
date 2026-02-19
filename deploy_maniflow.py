@@ -1,6 +1,6 @@
 import multiprocessing
-from workers.worker_deploy_policy import Gr00t_Inference
-from workers.worker_plot import worker_plot
+from workers.worker_deploy_policy_maniflow import Gr00t_Inference # change name for maniflow deployment
+from workers.worker_plot_maniflow import worker_plot
 import argparse
 import time
 
@@ -31,7 +31,7 @@ if __name__ == '__main__':
     multiprocessing.set_start_method('spawn', force=True)  # Windows일 경우 필수
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--policy",choices=["gr00t", "act"],default="gr00t",help="Which policy set to run")
+    parser.add_argument("--policy",choices=["gr00t", "act", "maniflow"],default="gr00t",help="Which policy set to run") # (NEW 0209): add maniflow as a policy choice
     parser.add_argument(
         "--mode",
         choices=["gr00t", "gr00t_zed", "gr00t_kistar", "gr00t_kistar_inspire"],
@@ -117,3 +117,17 @@ if __name__ == '__main__':
         shared_event["shutdown"].set()
         gr00t_process.join()
 
+# # 2026-02-10 run on PC with:
+
+# export CUDA_VISIBLE_DEVICES=0
+# export MANIFLOW_CKPT=/media/ansur/ANSURLAB/2026-02-11_maniflow_deploy/checkpoints/2026-02-05_apple_stereo_full_ddp_aug2/epoch=0006-val_loss=0.084252.ckpt
+# export MANIFLOW_STEPS=2
+# export MANIFLOW_USE_EMA=1
+# export MANIFLOW_COMPILE=0
+# conda activate g1-mf-deploy
+# cd /home/ansur/ssd2tb/Kapex-Vanilla-VLA/G1_Teleoperation
+# python deploy_maniflow.py \
+#   --mode gr00t_kistar_inspire \
+#   --policy maniflow \
+#   --action_method tem \
+#   --hand_model reduced_v3

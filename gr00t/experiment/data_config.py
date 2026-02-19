@@ -189,7 +189,52 @@ class UnitreeG1KistarInspireKistarDataConfig(UnitreeG1DataConfig):
     observation_indices = [0]
     action_indices = list(range(16))
 
-###########################################################################################
+class UnitreeG1KistarInspirePcaK7DataConfig(UnitreeG1DataConfig):
+    """ZED 양안 + bimanual + right_hand PCA(K=7) 데이터 설정"""
+    video_keys = ["video.ego_left_view", "video.ego_right_view"]
+
+    # modality.json에 맞춘 키들 (총 32D)
+    state_keys = [
+        "state.waist",
+        "state.head",
+        "state.left_arm",
+        "state.right_arm",
+        "state.left_hand",
+        "state.right_hand_pca",
+    ]
+    action_keys = [
+        "action.waist",
+        "action.head",
+        "action.left_arm",
+        "action.right_arm",
+        "action.left_hand",
+        "action.right_hand_pca",
+    ]
+
+    language_keys = ["annotation.human.task_description"]
+    observation_indices = [0]
+
+class UnitreeG1KistarOnlyDataConfig(UnitreeG1DataConfig):
+    """ZED 양안 + waist(3) + left_arm(6) + right_arm(7) + kistar_hand(16)"""
+    video_keys = ["video.ego_left_view", "video.ego_right_view"]
+
+    state_keys = [
+        "state.waist",
+        "state.left_arm",
+        "state.right_arm",
+        "state.kistar_hand",
+    ]
+    action_keys = [
+        "action.waist",
+        "action.left_arm",
+        "action.right_arm",
+        "action.kistar_hand",
+    ]
+
+    language_keys = ["annotation.human.task_description"]
+    observation_indices = [0]
+    action_indices = list(range(16))  
+
 
 DATA_CONFIG_MAP = {
     "unitree_g1": UnitreeG1DataConfig(),
@@ -198,5 +243,9 @@ DATA_CONFIG_MAP = {
     "unitree_g1_kistar_zed_mono_left": UnitreeG1KistarZedMonoLeftDataConfig(),
     "unitree_g1_kistar_zed_mono_right": UnitreeG1KistarZedMonoRightDataConfig(),
     "unitree_g1_kistar_realsense": UnitreeG1KistarRealsenseDataConfig(),
-    "unitree_g1_inspire_kistar": UnitreeG1KistarInspireKistarDataConfig()
+    "unitree_g1_inspire_kistar": UnitreeG1KistarInspireKistarDataConfig(),
+    "unitree_g1_kistar_inspire_pca_k7": UnitreeG1KistarInspirePcaK7DataConfig(),
+    "unitree_g1_kistar_only" : UnitreeG1KistarOnlyDataConfig(),
+
+
 }

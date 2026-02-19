@@ -135,15 +135,15 @@ def sequential_merge():
     """모든 데이터를 보존하면서 순차적으로 병합하고 처리합니다."""
     
     # --- 하드코딩 설정: 기본 경로 ---
-    # (요청 사항: /home/ansur/Ansur_unitree_teleop/record)
-    base_dir = Path("/home/ansur/Ansur_unitree_teleop/record/")
+    # (요청 사항: /home/ansur/G1_teleoperation/record)
+    base_dir = Path("/home/ansur/G1_teleoperation/record/")
     
     # --- 하드코딩 설정: 병합할 데이터셋 목록 ---
     # [task_index, "폴더명"] 형식으로 순서대로 나열합니다.
     # (요청 사항: "1030_pick_and_place_apple" 등)
     dataset_names = [
-        [0, "0116_glue_bimanual_down"],
-        [1, "0116_glue_bimanual_stand"],
+        [0, "0209_apple_pickup_"],
+        
     ]
     # -------------------------
 
@@ -155,7 +155,7 @@ def sequential_merge():
 
     # --- 하드코딩 설정: 최종 병합 폴더 ---
     # (요청 사항: "1030_pick_and_place")
-    merged_folder_name = "0116_glue_bimanual"
+    merged_folder_name = "0209_apple_pickup_pca"
     primary_path = base_dir / merged_folder_name
     
     if primary_path.exists():
