@@ -1,12 +1,17 @@
 import os
 import time
 import numpy as np
+from scipy.spatial.transform import Rotation as R
 
 from utils.state import State, EventsSnapshot, next_state
 from utils.rate import Rate
+from utils.mat_tool import fast_mat_inv
 
 from sharedmemory.shmManager import SharedMemoryManager
-from sharedmemory.shm_schema import TELEVISION, RECORD_MODE_LAYOUT, WORKER_FREQ, RECORD_EPISODE_LAYOUT, RECORD_TASK_LAYOUT, ROBOT_ACTION, ROBOT_OBS
+from sharedmemory.shm_schema import (
+    TELEVISION, RECORD_MODE_LAYOUT, WORKER_FREQ, RECORD_EPISODE_LAYOUT,
+    RECORD_TASK_LAYOUT, ROBOT_ACTION, ROBOT_OBS, QUEST_CONTROLLER,
+)
 
 from g1_control.g1_ik import G1_29_ArmIK
 
@@ -14,6 +19,13 @@ import pandas as pd
 
 import logging_mp
 logger_mp = logging_mp.get_logger(__name__)
+
+
+# ---- Controller-mode tunables -----------------------------------------------
+GRIP_THRESH       = 0.5     # squeeze >= GRIP_THRESH 이면 grip 누름으로 인식
+BUTTON_THRESH     = 0.5
+WAIST_LIMITS      = np.array([1.05, 0.6, 0.6])   # |yaw|, |roll|, |pitch| (rad) safety clamp
+WAIST_GAIN        = np.array([1.0, 1.0, 1.0])    # HMD delta -> waist target 매핑 게인
 
 
 def _events_snapshot(shared_event, g1_initialized: bool) -> EventsSnapshot:
@@ -30,13 +42,14 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand"):
     """vr_input: 'hand' (current behaviour) or 'controller' (Phase 1-C clutch IK)."""
 
     #Set SharedMemory
-    television_shm = SharedMemoryManager(TELEVISION, shared_lock["television_lock"], shm_name["television_shm"])
-    freq_shm = SharedMemoryManager(WORKER_FREQ, shared_lock["freq_lock"], shm_name["freq_shm"])
-    record_mode_shm = SharedMemoryManager(RECORD_MODE_LAYOUT, shared_lock["record_lock"], shm_name["record_mode_shm"])
-    record_episode_shm = SharedMemoryManager(RECORD_EPISODE_LAYOUT, shared_lock["record_lock"], shm_name["record_episode_shm"])
-    record_task_shm = SharedMemoryManager(RECORD_TASK_LAYOUT, shared_lock["record_lock"], shm_name["record_task_shm"])
-    robot_action_shm = SharedMemoryManager(ROBOT_ACTION, shared_lock["robot_action_lock"], shm_name["robot_action_shm"])
-    robot_obs_shm = SharedMemoryManager(ROBOT_OBS, shared_lock["robot_obs_lock"], shm_name["robot_obs_shm"])
+    television_shm       = SharedMemoryManager(TELEVISION,             shared_lock["television_lock"],       shm_name["television_shm"])
+    freq_shm             = SharedMemoryManager(WORKER_FREQ,            shared_lock["freq_lock"],             shm_name["freq_shm"])
+    record_mode_shm      = SharedMemoryManager(RECORD_MODE_LAYOUT,     shared_lock["record_lock"],           shm_name["record_mode_shm"])
+    record_episode_shm   = SharedMemoryManager(RECORD_EPISODE_LAYOUT,  shared_lock["record_lock"],           shm_name["record_episode_shm"])
+    record_task_shm      = SharedMemoryManager(RECORD_TASK_LAYOUT,     shared_lock["record_lock"],           shm_name["record_task_shm"])
+    robot_action_shm     = SharedMemoryManager(ROBOT_ACTION,           shared_lock["robot_action_lock"],     shm_name["robot_action_shm"])
+    robot_obs_shm        = SharedMemoryManager(ROBOT_OBS,              shared_lock["robot_obs_lock"],        shm_name["robot_obs_shm"])
+    quest_controller_shm = SharedMemoryManager(QUEST_CONTROLLER,       shared_lock["quest_controller_lock"], shm_name["quest_controller_shm"])
 
     # 50Hz 주기로 실행 
     rate = Rate(50.0)
@@ -67,10 +80,23 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand"):
     base_left_pos = base_right_pos = base_head_pos = None
     T_L_init = T_R_init = T_H_init = None
 
+    # ---- Controller-mode (vr_input == 'controller') 상태 ----
+    # SE(3) anchor / target. grip release 시 freeze, 다음 grip 시 다시 anchor 캡처.
+    T_ee_target_l = None;  T_ee_target_r = None
+    T_ctrl_anchor_l = None; T_ctrl_anchor_r = None
+    T_ee_anchor_l = None;   T_ee_anchor_r = None
+    prev_grip_l = False;    prev_grip_r = False
+    # Waist clutch: HMD pose 변화량을 G1 waist [yaw, roll, pitch] 에 매핑.
+    waist_anchor_head = None
+    waist_anchor_q    = None
+    target_waist_q    = None
+    # Ready 버튼 edge detection
+    prev_right_a_btn = False
+
     first_loop = True
 
     state = State.WAIT_CONNECT
-    logger_mp.info("[G1_IK] FSM start: WAIT_CONNECT")
+    logger_mp.info(f"[G1_IK] FSM start: WAIT_CONNECT (vr_input={vr_input})")
 
     try:
         while True:
@@ -122,89 +148,184 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand"):
 
                 if shared_event['set_start'].is_set() and not replay and not deploy:
                     vr_data = television_shm.read_data()
-                    
-                    head_pose        = vr_data["head_rmat"]
-                    left_wrist       = vr_data["left_wrist_mat"]
-                    right_wrist      = vr_data["right_wrist_mat"]
-                    
-                    ik_head_pose = head_pose.copy()
 
-                    translation = ik_head_pose[0:3, 3]
-
-                    # 전역 Z축으로 −0.6 이동
-                    translation[2] -= 0.6
-
-                    # 업데이트
-                    ik_head_pose[0:3, 3] = translation
+                    head_pose   = vr_data["head_rmat"]
+                    left_wrist  = vr_data["left_wrist_mat"]
+                    right_wrist = vr_data["right_wrist_mat"]
 
                     robot_obs = robot_obs_shm.read_data()
-
-                    # 현재 로봇 상태 읽기 
-                    current_waist_q  = robot_obs["obs_waist"]
-                    current_head = robot_obs["obs_head"]
-                    current_arm_q  = robot_obs["obs_arm"]
+                    current_waist_q = robot_obs["obs_waist"]
+                    current_head    = robot_obs["obs_head"]
+                    current_arm_q   = robot_obs["obs_arm"]
 
                     if home:
-                        # 현재 VR 위치를 기준점으로 저장
+                        # 양쪽 모드 공통: VR/EE/head anchor 재설정
                         base_left_pos  = left_wrist[:3, 3].copy()
                         base_right_pos = right_wrist[:3, 3].copy()
                         base_head_pos  = head_pose[:3, 3].copy()
-
-                        # 로봇의 초기 자세도 저장
                         T_L_init, T_R_init, T_H_init = g1_ik_solver.init_pose()
-
                         set_home = True
+                        # controller-mode 상태 초기화
+                        T_ee_target_l = T_L_init.copy()
+                        T_ee_target_r = T_R_init.copy()
+                        T_ctrl_anchor_l = T_ctrl_anchor_r = None
+                        T_ee_anchor_l = T_ee_anchor_r   = None
+                        waist_anchor_head = None
+                        waist_anchor_q    = None
+                        target_waist_q    = current_waist_q.copy()
+                        prev_grip_l = prev_grip_r = False
+                        prev_right_a_btn = False
 
                         record_mode_data = record_mode_shm.read_data()
                         record_mode_data["home"] = False
                         record_mode_shm.write_data(**record_mode_data)
 
-                
-                    if set_home and base_left_pos is not None:
-                        # VR 현재 위치 
-                        R_L, p_L = left_wrist[:3, :3],  left_wrist[:3, 3]
-                        R_R, p_R = right_wrist[:3, :3], right_wrist[:3, 3]
-                        R_H, p_H = head_pose[:3, :3],   head_pose[:3, 3]
+                    # ===========================================================
+                    # vr_input == "controller": clutch (grip-hold) + waist + ready
+                    # ===========================================================
+                    if vr_input == "controller":
+                        ctrl_data = quest_controller_shm.read_data()
 
-                        # 4) 기준 위치 대비 translation delta
-                        delta_p_L = p_L - base_left_pos
-                        delta_p_R = p_R - base_right_pos
-                        delta_p_H = p_H - base_head_pos
+                        T_ctrl_l_now = ctrl_data["left_ctrl_mat"]
+                        T_ctrl_r_now = ctrl_data["right_ctrl_mat"]
 
-                        # 5) 로봇 홈 EE 위치에 delta를 더해 goal translation 생성
-                        goal_p_L = T_L_init[:3, 3] + delta_p_L
-                        goal_p_R = T_R_init[:3, 3] + delta_p_R
-                        goal_p_H = T_H_init[:3, 3] + delta_p_H
+                        grip_l = float(ctrl_data["left_squeeze"])  >= GRIP_THRESH
+                        grip_r = float(ctrl_data["right_squeeze"]) >= GRIP_THRESH
 
-                        # 6) 최종 target transform 조립 (orientation은 원본 human R 사용)
-                        rel_left_wrist  = np.eye(4)
-                        rel_left_wrist[:3, :3] = R_L
-                        rel_left_wrist[:3,  3] = goal_p_L
+                        # ---- ready button (right A) edge detection -------------
+                        right_a = float(ctrl_data["right_buttons"][0]) >= BUTTON_THRESH
+                        if right_a and not prev_right_a_btn:
+                            logger_mp.info("[G1_IK] Right-A pressed -> trigger HOME (ready pose).")
+                            rm = record_mode_shm.read_data()
+                            rm["home"]  = True
+                            rm["start"] = False
+                            record_mode_shm.write_data(**rm)
+                            shared_event['set_start'].clear()
+                        prev_right_a_btn = right_a
 
-                        rel_right_wrist = np.eye(4)
-                        rel_right_wrist[:3, :3] = R_R
-                        rel_right_wrist[:3,  3] = goal_p_R
+                        # ---- left arm clutch -----------------------------------
+                        if T_ee_target_l is None:
+                            T_ee_target_l = T_L_init.copy() if T_L_init is not None else np.eye(4)
+                        if grip_l:
+                            if not prev_grip_l:
+                                T_ctrl_anchor_l = T_ctrl_l_now.copy()
+                                T_ee_anchor_l   = T_ee_target_l.copy()
+                                logger_mp.info("[G1_IK] LEFT grip ENGAGE")
+                            delta_l = T_ctrl_l_now @ fast_mat_inv(T_ctrl_anchor_l)
+                            T_ee_target_l = delta_l @ T_ee_anchor_l
+                        else:
+                            if prev_grip_l:
+                                logger_mp.info("[G1_IK] LEFT grip RELEASE -> freeze EE target")
+                            # freeze: T_ee_target_l 그대로 유지
+                        prev_grip_l = grip_l
 
-                        rel_head_pose   = np.eye(4)
-                        rel_head_pose[:3, :3] = R_H
-                        rel_head_pose[:3,  3] = goal_p_H
+                        # ---- right arm clutch ----------------------------------
+                        if T_ee_target_r is None:
+                            T_ee_target_r = T_R_init.copy() if T_R_init is not None else np.eye(4)
+                        if grip_r:
+                            if not prev_grip_r:
+                                T_ctrl_anchor_r = T_ctrl_r_now.copy()
+                                T_ee_anchor_r   = T_ee_target_r.copy()
+                                logger_mp.info("[G1_IK] RIGHT grip ENGAGE")
+                            delta_r = T_ctrl_r_now @ fast_mat_inv(T_ctrl_anchor_r)
+                            T_ee_target_r = delta_r @ T_ee_anchor_r
+                        else:
+                            if prev_grip_r:
+                                logger_mp.info("[G1_IK] RIGHT grip RELEASE -> freeze EE target")
+                        prev_grip_r = grip_r
 
-                        current_lr_arm_qdml = np.concatenate((current_waist_q, current_head, current_arm_q))
-                        sol_q, sol_tauff, pelvis_height, torso_quat = g1_ik_solver.solve_ik(rel_left_wrist, rel_right_wrist, rel_head_pose, current_lr_arm_qdml)
+                        # ---- waist clutch (HMD delta -> waist target) ----------
+                        # grip 한쪽 이상 누른 동안만 HMD 변화를 waist 에 반영.
+                        if grip_l or grip_r:
+                            if waist_anchor_head is None:
+                                waist_anchor_head = head_pose.copy()
+                                waist_anchor_q    = current_waist_q.copy()
+                            R_now    = head_pose[:3, :3]
+                            R_anchor = waist_anchor_head[:3, :3]
+                            R_delta  = R_now @ R_anchor.T
+                            # 'zyx' euler -> [yaw, pitch, roll] (radians)
+                            yaw_d, pitch_d, roll_d = R.from_matrix(R_delta).as_euler('zyx')
+                            # G1 waist joint order: [yaw, roll, pitch]
+                            delta_waist = np.array([yaw_d, roll_d, pitch_d]) * WAIST_GAIN
+                            tw = waist_anchor_q + delta_waist
+                            target_waist_q = np.clip(tw, -WAIST_LIMITS, WAIST_LIMITS)
+                        else:
+                            waist_anchor_head = None
+                            waist_anchor_q    = None
+                            # grip 미누름 시 현재 waist q 를 target 으로 freeze
+                            if target_waist_q is None:
+                                target_waist_q = current_waist_q.copy()
 
+                        # ---- IK 풀이 -------------------------------------------
+                        # head 는 기본 init 자세 고정 (HMD 자세 != 로봇 머리; 머리 모션은 별도 결정)
+                        rel_head_pose = T_H_init if T_H_init is not None else np.eye(4)
+                        # IK seed 의 waist 부분에 target_waist_q 를 넣어 일관성 유도
+                        seed_waist = target_waist_q
+                        current_lr_arm_qdml = np.concatenate((seed_waist, current_head, current_arm_q))
+                        sol_q, sol_tauff, _, _ = g1_ik_solver.solve_ik(
+                            T_ee_target_l, T_ee_target_r, rel_head_pose, current_lr_arm_qdml,
+                        )
+
+                        # waist 는 우리가 직접 명령(IK 결과 sol_q[:3] 무시),
+                        # head 도 init 고정(0)이므로 IK 결과 대신 0 사용해도 무방하지만
+                        # IK 가 head dof 를 안 건드린다는 보장이 없으므로 그대로 두면 0 근처 유지.
+                        robot_action_shm.write_data(
+                            action_waist     =target_waist_q,
+                            action_waist_tauff=np.zeros(3),
+                            action_head      =np.zeros(2),                 # controller 모드: 머리 정면 고정
+                            action_arm       =sol_q[5:],
+                            action_arm_tauff =sol_tauff[5:],
+                        )
+
+                    # ===========================================================
+                    # vr_input == "hand": 기존 home-rebase + 절대좌표 fallback
+                    # ===========================================================
                     else:
-                        # 절대 좌표 IK: VR 원본 데이터 직접 사용
-                        current_lr_arm_qdml = np.concatenate((current_waist_q, current_head, current_arm_q))
-                        sol_q, sol_tauff, pelvis_height, torso_quat = g1_ik_solver.solve_ik(left_wrist, right_wrist, ik_head_pose, current_lr_arm_qdml)
+                        ik_head_pose = head_pose.copy()
+                        ik_head_pose[2, 3] -= 0.6  # head_rmat translation z 보정 (기존 동작 유지)
 
-                    # IK를 푼 결과를 action에 전달
-                    robot_action_shm.write_data(
-                        action_waist=sol_q[:3],               # 허리 3개
-                        action_waist_tauff=sol_tauff[:3],
-                        action_head=sol_q[3:5],               # 머리 2개
-                        action_arm=sol_q[5:],                 # 팔 14개
-                        action_arm_tauff=sol_tauff[5:],
-                    )
+                        if set_home and base_left_pos is not None:
+                            R_L, p_L = left_wrist[:3, :3],  left_wrist[:3, 3]
+                            R_R, p_R = right_wrist[:3, :3], right_wrist[:3, 3]
+                            R_H, p_H = head_pose[:3, :3],   head_pose[:3, 3]
+
+                            delta_p_L = p_L - base_left_pos
+                            delta_p_R = p_R - base_right_pos
+                            delta_p_H = p_H - base_head_pos
+
+                            goal_p_L = T_L_init[:3, 3] + delta_p_L
+                            goal_p_R = T_R_init[:3, 3] + delta_p_R
+                            goal_p_H = T_H_init[:3, 3] + delta_p_H
+
+                            rel_left_wrist  = np.eye(4)
+                            rel_left_wrist[:3, :3] = R_L
+                            rel_left_wrist[:3,  3] = goal_p_L
+
+                            rel_right_wrist = np.eye(4)
+                            rel_right_wrist[:3, :3] = R_R
+                            rel_right_wrist[:3,  3] = goal_p_R
+
+                            rel_head_pose   = np.eye(4)
+                            rel_head_pose[:3, :3] = R_H
+                            rel_head_pose[:3,  3] = goal_p_H
+
+                            current_lr_arm_qdml = np.concatenate((current_waist_q, current_head, current_arm_q))
+                            sol_q, sol_tauff, _, _ = g1_ik_solver.solve_ik(
+                                rel_left_wrist, rel_right_wrist, rel_head_pose, current_lr_arm_qdml,
+                            )
+                        else:
+                            current_lr_arm_qdml = np.concatenate((current_waist_q, current_head, current_arm_q))
+                            sol_q, sol_tauff, _, _ = g1_ik_solver.solve_ik(
+                                left_wrist, right_wrist, ik_head_pose, current_lr_arm_qdml,
+                            )
+
+                        robot_action_shm.write_data(
+                            action_waist     =sol_q[:3],
+                            action_waist_tauff=sol_tauff[:3],
+                            action_head      =sol_q[3:5],
+                            action_arm       =sol_q[5:],
+                            action_arm_tauff =sol_tauff[5:],
+                        )
 
                 if replay and not replay_demo_init :
                     logger_mp.info(f"[replay init]")
@@ -321,3 +442,4 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand"):
         television_shm.worker_close(); robot_action_shm.worker_close(); robot_obs_shm.worker_close()
         record_mode_shm.worker_close(); freq_shm.worker_close()
         record_episode_shm.worker_close(); record_task_shm.worker_close()
+        quest_controller_shm.worker_close()
