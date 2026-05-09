@@ -26,7 +26,8 @@ def _events_snapshot(shared_event, g1_initialized: bool) -> EventsSnapshot:
         select_pressed = False
     )
 
-def worker_g1_ik(shared_event, shm_name, shared_lock, ctrl_mode):
+def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand"):
+    """vr_input: 'hand' (current behaviour) or 'controller' (Phase 1-C clutch IK)."""
 
     #Set SharedMemory
     television_shm = SharedMemoryManager(TELEVISION, shared_lock["television_lock"], shm_name["television_shm"])

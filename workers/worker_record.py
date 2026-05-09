@@ -6,7 +6,10 @@ from utils.rate import Rate
 from utils import ParquetSink, VideoSink
 
 from sharedmemory.shmManager import SharedMemoryManager
-from sharedmemory.shm_schema import CAMERA, RECORD_TASK_LAYOUT, RECORD_EPISODE_LAYOUT, RECORD_MODE_LAYOUT, CURRENT_MODE_LAYOUT, WORKER_FREQ, ROBOT_ACTION, ROBOT_OBS, WORKSPACE_MASK, MODE_MAPPING, MODE_MAPPING_INV
+from sharedmemory.shm_schema import (
+    CAMERA, RECORD_TASK_LAYOUT, RECORD_EPISODE_LAYOUT, RECORD_MODE_LAYOUT,
+    WORKER_FREQ, ROBOT_ACTION, ROBOT_OBS, WORKSPACE_MASK,
+)
 
 import numpy as np
 import cv2
@@ -25,18 +28,6 @@ class State(Enum):
 def read_mode_snapshot(shm):
     m = shm.read_data()
     return bool(m["start"]), bool(m["reset"]), bool(m["replay"]), m
-
-def get_current_mode(current_mode_shm):
-    """공유 메모리에서 현재 모드 정보를 읽어옴 (정수 → 문자열 변환)"""
-    try:
-        mode_data = current_mode_shm.read_data()
-        mode_int = int(mode_data["mode"].item())
-        current_mode = MODE_MAPPING_INV.get(mode_int, 'teleop')
-        
-        return current_mode
-    except Exception as e:
-        logger_mp.warning(f"[Record] 모드 정보 읽기 실패: {e}, 기본값 'teleop' 사용")
-        return "teleop"
 
 def worker_record(shared_event, shm_name, shared_lock):
     """
@@ -76,20 +67,14 @@ def worker_record(shared_event, shm_name, shared_lock):
             return None
 
     # 기본 공유 메모리 객체들 생성
-    record_task_shm = create_shm("record_task_shm", RECORD_TASK_LAYOUT, "record_lock")
+    record_task_shm    = create_shm("record_task_shm",    RECORD_TASK_LAYOUT,    "record_lock")
     record_episode_shm = create_shm("record_episode_shm", RECORD_EPISODE_LAYOUT, "record_lock")
-    record_mode_shm = create_shm("record_mode_shm", RECORD_MODE_LAYOUT, "record_lock")
-    current_mode_shm = create_shm("current_mode_shm", CURRENT_MODE_LAYOUT, "record_lock")
-    camera_shm = create_shm("camera_shm", CAMERA, "camera_lock")
-    robot_action_shm = create_shm("robot_action_shm", ROBOT_ACTION, "robot_action_lock")
-    robot_obs_shm = create_shm("robot_obs_shm", ROBOT_OBS, "robot_obs_lock")
-    freq_shm = create_shm("freq_shm", WORKER_FREQ, "freq_lock")
-    workspace_mask_shm = create_shm("workspace_mask_shm", WORKSPACE_MASK, "workspace_mask_lock")
-
-    if current_mode_shm:
-        current_mode = get_current_mode(current_mode_shm)
-    else:
-        current_mode = "teleop"
+    record_mode_shm    = create_shm("record_mode_shm",    RECORD_MODE_LAYOUT,    "record_lock")
+    camera_shm         = create_shm("camera_shm",         CAMERA,                "camera_lock")
+    robot_action_shm   = create_shm("robot_action_shm",   ROBOT_ACTION,          "robot_action_lock")
+    robot_obs_shm      = create_shm("robot_obs_shm",      ROBOT_OBS,             "robot_obs_lock")
+    freq_shm           = create_shm("freq_shm",           WORKER_FREQ,           "freq_lock")
+    workspace_mask_shm = create_shm("workspace_mask_shm", WORKSPACE_MASK,        "workspace_mask_lock")
 
     freq = 20.0
     rate = Rate(freq)

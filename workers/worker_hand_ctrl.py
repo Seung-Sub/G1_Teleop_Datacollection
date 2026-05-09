@@ -27,7 +27,9 @@ def _events_snapshot(shared_event, hand_initialized: bool) -> EventsSnapshot:
         select_pressed = False
     )
 
-def worker_hand_ctrl(shared_event, shm_name, shared_lock):
+def worker_hand_ctrl(shared_event, shm_name, shared_lock, vr_input="hand"):
+    """vr_input: 'hand' (current dex_retargeting) or 'controller' (Phase 2 trigger toggle).
+    Phase 1-B에서는 인자만 받고 동작은 그대로 둔다 — 분기는 Phase 2에서 추가."""
     #Set SharedMemory
     television_shm = SharedMemoryManager(TELEVISION, shared_lock["television_lock"], shm_name["television_shm"])
     freq_shm = SharedMemoryManager(WORKER_FREQ, shared_lock["freq_lock"], shm_name["freq_shm"])

@@ -3,13 +3,16 @@ import numpy as np
 
 # (field_name, shape, dtype)
 
-MODE_MAPPING = {
-    'teleop': 0,
-    'gr00t': 1,
-    'gr00t_zed': 2,
-}
+# ---- 직교 옵션 매핑 (main.py CLI flag <-> int code) ----
+# 텔레옵은 항상 동일한 골격(arm IK + Inspire 양손 + ZED|RealSense 카메라).
+# 정책 분기는 이 세 축으로만 결정한다.
+HAND_MAPPING       = {'inspire':    0}
+CAMERA_MAPPING     = {'zed':        0, 'realsense': 1}
+VR_INPUT_MAPPING   = {'hand':       0, 'controller': 1}
 
-MODE_MAPPING_INV = {v: k for k, v in MODE_MAPPING.items()}
+HAND_MAPPING_INV     = {v: k for k, v in HAND_MAPPING.items()}
+CAMERA_MAPPING_INV   = {v: k for k, v in CAMERA_MAPPING.items()}
+VR_INPUT_MAPPING_INV = {v: k for k, v in VR_INPUT_MAPPING.items()}
 
 
 ROBOT_OBS = [
@@ -130,9 +133,12 @@ MASK_CONTROL_LAYOUT = [
     ("generate_new_mask",    (), np.bool_),  # 새 마스크 생성 요청
 ]
 
-# 모드 정보 전용 공유 메모리 (정수형 모드 사용)
-CURRENT_MODE_LAYOUT = [
-    ("mode",           (),    np.int32),  # 모드 정보 저장 (0: teleop, 1: kistar_teleop, 2: kistar_only 등)
+# 텔레옵 구성(직교 옵션) 공유 메모리.
+# main.py 가 시작 시 1회 채우고, record/log 등에서 참고만 한다 (분기 X).
+TELEOP_CONFIG = [
+    ("hand_type",  (), np.int32),  # HAND_MAPPING       (e.g. 0=inspire)
+    ("camera_type",(), np.int32),  # CAMERA_MAPPING     (0=zed, 1=realsense)
+    ("vr_input",   (), np.int32),  # VR_INPUT_MAPPING   (0=hand, 1=controller)
 ]
 
 LEFT_TOUCH_SENSOR_LAYOUT = [
