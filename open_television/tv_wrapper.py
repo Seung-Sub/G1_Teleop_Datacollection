@@ -64,8 +64,9 @@ under (basis) Robot Convention, hand's initial pose convention:
 """
 
 class TeleVisionWrapper:
-    def __init__(self, binocular, img_shape, img_shm_name):
-        self.tv = TeleVision(binocular, img_shape, img_shm_name)
+    def __init__(self, binocular, img_shape, img_shm_name, vr_input="hand"):
+        self.tv = TeleVision(binocular, img_shape, img_shm_name, vr_input=vr_input)
+        self.vr_input = vr_input
 
     def get_data(self):
 
@@ -165,3 +166,44 @@ class TeleVisionWrapper:
         return (head_rmat, unitree_left_wrist, unitree_right_wrist,
                 unitree_left_hand, unitree_right_hand,
                 right_distal_points, right_proximal_points)
+
+    # ------------------------------------------------------------------
+    # Quest3 Controller 모드 데이터 — clutch 등 다운스트림 처리 *전* 변환만 수행
+    # ------------------------------------------------------------------
+    def get_controller_data(self):
+        """
+        Vuer raw controller pose 를 Robot Convention(Z-up, x-front) 기저로
+        similarity transform 한 head/left/right SE(3) 와 입력 상태(state) 를
+        반환한다.
+
+        - hand-tracking 과 다른 점: T_to_unitree_left/right_wrist 곱셈을 수행
+          하지 않는다. xr_teleoperate 에 따르면 Vuer 가 컨트롤러 pose 를 이미
+          Unitree URDF 와 같은 축 규약으로 보내준다.
+        - clutch (grip 동안만 추종) 와 head→waist, head_pose 기반 상대 좌표
+          처리는 본 함수에서 수행하지 않고 worker_g1_ik 에서 처리한다.
+
+        반환:
+            head_mat        (4,4) Robot Convention SE(3)
+            left_ctrl_mat   (4,4)
+            right_ctrl_mat  (4,4)
+            left_state      (7,) [trigger, squeeze, tx, ty, a, b, thumb_click]
+            right_state     (7,)
+            connected       bool
+        """
+        head_vuer_mat, _ = mat_update(const_head_vuer_mat, self.tv.head_matrix.copy())
+        left_vuer_mat, left_flag   = mat_update(const_left_wrist_vuer_mat,
+                                                self.tv.left_ctrl_pose.copy())
+        right_vuer_mat, right_flag = mat_update(const_right_wrist_vuer_mat,
+                                                self.tv.right_ctrl_pose.copy())
+
+        # 좌표 기저 변경 (OpenXR -> Robot)
+        head_mat       = T_robot_openxr @ head_vuer_mat  @ fast_mat_inv(T_robot_openxr)
+        left_ctrl_mat  = T_robot_openxr @ left_vuer_mat  @ fast_mat_inv(T_robot_openxr)
+        right_ctrl_mat = T_robot_openxr @ right_vuer_mat @ fast_mat_inv(T_robot_openxr)
+        # NOTE: T_to_unitree_left/right_wrist 는 곱하지 않는다.
+
+        left_state  = self.tv.left_ctrl_state
+        right_state = self.tv.right_ctrl_state
+        connected   = self.tv.is_controller_connected
+
+        return head_mat, left_ctrl_mat, right_ctrl_mat, left_state, right_state, connected

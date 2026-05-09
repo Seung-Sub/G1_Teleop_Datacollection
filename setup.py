@@ -14,8 +14,6 @@ base_requires = [
     "params-proto==2.12.1",
     "pytransform3d==3.5.0",
     "scikit-learn==1.3.2",
-    "seaborn==0.13.2",
-    "rerun-sdk==0.20.1",
     "nlopt>=2.6.1,<2.8.0",
     "trimesh>=4.4.0",
     "anytree>=2.12.0",
@@ -31,18 +29,24 @@ base_requires = [
 
 # --------------- 선택적(extra) 의존성 ---------------
 extras = {
-    # 4) 역기구학 (Inverse Kinematics) - conda로 pinocchio 설치 후, pip로 아래 두 개 설치
+    # 역기구학 (Inverse Kinematics) - conda로 pinocchio 설치 후, pip로 아래 두 개 설치
     "ik": [
         "meshcat",
         "casadi",
     ],
-    # 5) Hand Tracking
-    "hand": [
-        "vuer[all]==0.0.35",
+    # VR 입력 (hand tracking + controller, Quest3)
+    # Controller 입력(MotionControllers / CONTROLLER_MOVE event) 지원을 위해 0.0.60 이상 권장.
+    "vr": [
+        "vuer[all]>=0.0.60,<0.1.0",
     ],
     # FFmpeg 플러그인
     "video": [
         "imageio[ffmpeg]",
+    ],
+    # 데이터 변환(Phase 3): Diffusion Policy zarr export
+    "dataset_dp": [
+        "zarr>=2.16,<3.0",
+        "numcodecs",
     ],
 }
 

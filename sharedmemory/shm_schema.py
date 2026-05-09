@@ -85,6 +85,24 @@ TELEVISION = [
     ("right_proximal",   (5, 3),    np.float64),
 ]
 
+# Quest3 controller 입력 (Vuer CONTROLLER_MOVE 이벤트로부터)
+# - 좌/우 4x4 SE(3) pose (Robot Convention 으로 변환 후 저장)
+# - trigger / squeeze(=grip) / thumbstick / buttons (a, b, thumbstick_click)
+# - connected: 한 번이라도 컨트롤러 이벤트가 들어왔는지 여부
+QUEST_CONTROLLER = [
+    ("left_ctrl_mat",     (4, 4),  np.float64),
+    ("right_ctrl_mat",    (4, 4),  np.float64),
+    ("left_trigger",      (),      np.float32),
+    ("left_squeeze",      (),      np.float32),
+    ("left_thumbstick",   (2,),    np.float32),
+    ("left_buttons",      (3,),    np.float32),  # [a/x, b/y, thumbstick_click]
+    ("right_trigger",     (),      np.float32),
+    ("right_squeeze",     (),      np.float32),
+    ("right_thumbstick",  (2,),    np.float32),
+    ("right_buttons",     (3,),    np.float32),
+    ("connected",         (),      np.bool_),
+]
+
 RECORD_TASK_LAYOUT = [
     ("task_name",      (),    np.dtype("U64")),
 ]

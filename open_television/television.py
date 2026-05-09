@@ -1,6 +1,13 @@
 import time
 from vuer import Vuer
 from vuer.schemas import ImageBackground, Hands
+try:
+    # vuer >= 0.0.40 ships MotionControllers. Older versions may not.
+    from vuer.schemas import MotionControllers
+    _HAS_MOTION_CONTROLLERS = True
+except Exception:
+    MotionControllers = None
+    _HAS_MOTION_CONTROLLERS = False
 from multiprocessing import Array, Process, shared_memory, Lock
 import numpy as np
 import asyncio
@@ -15,8 +22,19 @@ from sharedmemory.shm_schema import CAMERA
 
 
 class TeleVision:
-    def __init__(self, binocular, img_shape, img_shm_name, cert_file="./cert.pem", key_file="./key.pem", ngrok=False):
+    def __init__(self, binocular, img_shape, img_shm_name,
+                 cert_file="./cert.pem", key_file="./key.pem",
+                 ngrok=False, vr_input="hand"):
+        """
+        vr_input:
+            "hand"       - Quest3 hand tracking (Vuer HAND_MOVE 이벤트)
+            "controller" - Quest3 controller (Vuer CONTROLLER_MOVE 이벤트)
+            HMD를 머리에 쓰든 목에 걸든 동일한 채널을 사용. controller 모드는
+            wrist target으로 controller pose를, button/trigger/squeeze 를 추가
+            shared array에 적재한다.
+        """
         self.binocular = binocular
+        self.vr_input = vr_input
         self.img_height = img_shape[0]
         if binocular:
             self.img_width  = img_shape[1] // 2
@@ -28,8 +46,11 @@ class TeleVision:
         else:
             self.vuer = Vuer(host='0.0.0.0', port=8012, queries=dict(grid=False), queue_len=3)
 
+        # 양쪽 핸들러 모두 등록 — Vuer는 활성 입력 종류에 맞는 이벤트만 발화한다.
         self.vuer.add_handler("HAND_MOVE")(self.on_hand_move)
         self.vuer.add_handler("CAMERA_MOVE")(self.on_cam_move)
+        if _HAS_MOTION_CONTROLLERS:
+            self.vuer.add_handler("CONTROLLER_MOVE")(self.on_controller_move)
 
         # existing_shm = shared_memory.SharedMemory(name=img_shm_name)
         # self.img_array = np.ndarray(img_shape, dtype=np.uint8, buffer=existing_shm.buf)
@@ -59,9 +80,15 @@ class TeleVision:
         self.head_matrix_shared = Array('d', 16, lock=True)
         self.aspect_shared = Value('d', 1.0, lock=True)
 
-        # self.process = Process(target=self.vuer_run)
-        # self.process.daemon = True
-        # self.process.start()
+        # ---- Quest3 controller shared state (vr_input="controller" 시 사용) ----
+        # 4x4 SE(3) — Vuer는 column-major 16-float, on_controller_move 에서 그대로 저장
+        self.left_ctrl_shared  = Array('d', 16, lock=True)
+        self.right_ctrl_shared = Array('d', 16, lock=True)
+        # state floats: [trigger, squeeze, thumb_x, thumb_y, a_or_x, b_or_y, thumb_click]
+        self.left_ctrl_state_shared  = Array('d', 7, lock=True)
+        self.right_ctrl_state_shared = Array('d', 7, lock=True)
+        # 한 번이라도 controller 이벤트가 들어왔는지
+        self.controller_connected = Value('i', 0, lock=True)
 
         self.thread = threading.Thread(target=self.vuer_run, daemon=True, name="VUER_THREAD")
         self.thread.start()
@@ -156,8 +183,62 @@ class TeleVision:
             print(f"Error processing hand data: {e}")
             pass
 
+    async def on_controller_move(self, event, session, fps=60):
+        """
+        Quest3 controller 이벤트 처리.
+        Vuer CONTROLLER_MOVE payload (vuer >= 0.0.40 기준):
+          event.value = {
+            "left":  [16 floats column-major SE(3)],
+            "right": [16 floats column-major SE(3)],
+            "leftState":  {"trigger":bool, "triggerValue":float, "squeeze":bool,
+                           "squeezeValue":float, "thumbstick":bool,
+                           "thumbstickValue":[x,y], "aButton":bool, "bButton":bool},
+            "rightState": {... 동일 ...}
+          }
+        ※ aButton/bButton: 우측 컨트롤러는 A/B, 좌측은 X/Y에 해당.
+        """
+        try:
+            v = event.value or {}
+
+            left_pose  = v.get("left")
+            right_pose = v.get("right")
+            if isinstance(left_pose, list) and len(left_pose) >= 16:
+                self.left_ctrl_shared[:] = left_pose[:16]
+            if isinstance(right_pose, list) and len(right_pose) >= 16:
+                self.right_ctrl_shared[:] = right_pose[:16]
+
+            def _state_to_array(state):
+                if not isinstance(state, dict):
+                    return [0.0] * 7
+                ts = state.get("thumbstickValue") or [0.0, 0.0]
+                tx = float(ts[0]) if len(ts) > 0 else 0.0
+                ty = float(ts[1]) if len(ts) > 1 else 0.0
+                return [
+                    float(state.get("triggerValue", 0.0)),
+                    float(state.get("squeezeValue", 0.0)),
+                    tx, ty,
+                    1.0 if state.get("aButton", False) else 0.0,
+                    1.0 if state.get("bButton", False) else 0.0,
+                    1.0 if state.get("thumbstick", False) else 0.0,
+                ]
+
+            left_state  = _state_to_array(v.get("leftState"))
+            right_state = _state_to_array(v.get("rightState"))
+            self.left_ctrl_state_shared[:]  = left_state
+            self.right_ctrl_state_shared[:] = right_state
+
+            # 한 번이라도 들어왔으면 connected=True 로 고정
+            self.controller_connected.value = 1
+        except Exception as e:
+            print(f"Error processing controller data: {e}")
+
     async def main_image_binocular(self, session, fps=60):
-        session.upsert @ Hands(fps=fps, stream=True, key="hands", showLeft=False, showRight=False)
+        if self.vr_input == "controller" and _HAS_MOTION_CONTROLLERS:
+            session.upsert @ MotionControllers(fps=fps, stream=True, key="ctrls",
+                                               left=True, right=True)
+        else:
+            session.upsert @ Hands(fps=fps, stream=True, key="hands",
+                                   showLeft=False, showRight=False)
         while True:
             try:
                 data_dict = self.camera_image.read_data()
@@ -205,7 +286,12 @@ class TeleVision:
             await asyncio.sleep(0.016 * 2)
 
     async def main_image_monocular(self, session, fps=60):
-        session.upsert @ Hands(fps=fps, stream=True, key="hands", showLeft=False, showRight=False)
+        if self.vr_input == "controller" and _HAS_MOTION_CONTROLLERS:
+            session.upsert @ MotionControllers(fps=fps, stream=True, key="ctrls",
+                                               left=True, right=True)
+        else:
+            session.upsert @ Hands(fps=fps, stream=True, key="hands",
+                                   showLeft=False, showRight=False)
         while True:
             # display_image = cv2.cvtColor(self.img_array, cv2.COLOR_BGR2RGB)
 
@@ -271,6 +357,28 @@ class TeleVision:
     @property
     def aspect(self):
         return float(self.aspect_shared.value)
+
+    # ---- Quest3 controller properties (vr_input="controller") ----
+    @property
+    def left_ctrl_pose(self):
+        return np.array(self.left_ctrl_shared[:]).reshape(4, 4, order="F")
+
+    @property
+    def right_ctrl_pose(self):
+        return np.array(self.right_ctrl_shared[:]).reshape(4, 4, order="F")
+
+    @property
+    def left_ctrl_state(self):
+        # [trigger, squeeze, thumb_x, thumb_y, a, b, thumb_click]
+        return np.array(self.left_ctrl_state_shared[:], dtype=np.float64)
+
+    @property
+    def right_ctrl_state(self):
+        return np.array(self.right_ctrl_state_shared[:], dtype=np.float64)
+
+    @property
+    def is_controller_connected(self):
+        return bool(self.controller_connected.value)
     
 if __name__ == '__main__':
     import os 
