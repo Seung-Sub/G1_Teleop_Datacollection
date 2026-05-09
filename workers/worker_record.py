@@ -9,6 +9,7 @@ from sharedmemory.shmManager import SharedMemoryManager
 from sharedmemory.shm_schema import (
     CAMERA, RECORD_TASK_LAYOUT, RECORD_EPISODE_LAYOUT, RECORD_MODE_LAYOUT,
     WORKER_FREQ, ROBOT_ACTION, ROBOT_OBS, WORKSPACE_MASK,
+    TELEOP_CONFIG, CAMERA_MAPPING_INV,
 )
 
 import numpy as np
@@ -75,6 +76,19 @@ def worker_record(shared_event, shm_name, shared_lock):
     robot_obs_shm      = create_shm("robot_obs_shm",      ROBOT_OBS,             "robot_obs_lock")
     freq_shm           = create_shm("freq_shm",           WORKER_FREQ,           "freq_lock")
     workspace_mask_shm = create_shm("workspace_mask_shm", WORKSPACE_MASK,        "workspace_mask_lock")
+    teleop_config_shm  = create_shm("teleop_config_shm",  TELEOP_CONFIG,         "record_lock")
+
+    # 카메라 종류는 main.py 가 시작 시 한 번 기록한 값을 참고만 한다 (분기 X 대신 view 토글).
+    camera_type_str = "zed"  # default
+    if teleop_config_shm is not None:
+        try:
+            cfg = teleop_config_shm.read_data()
+            camera_type_str = CAMERA_MAPPING_INV.get(int(cfg["camera_type"].item()), "zed")
+        except Exception as e:
+            logger_mp.warning(f"[Record] teleop_config 읽기 실패: {e}")
+    use_zed       = (camera_type_str == "zed")
+    use_realsense = (camera_type_str == "realsense")
+    logger_mp.info(f"[Record] camera_type={camera_type_str} (use_zed={use_zed}, use_realsense={use_realsense})")
 
     freq = 20.0
     rate = Rate(freq)
@@ -228,6 +242,12 @@ def worker_record(shared_event, shm_name, shared_lock):
                 img_left      = image_dict.get("camera_left", None)
                 img_right     = image_dict.get("camera_right", None)
                 img_realsense = image_dict.get("realsense", None)
+                # camera_type 에 따라 사용 안 하는 view 는 None 으로 — video_sink 가 mp4 안 만든다.
+                if not use_zed:
+                    img_left  = None
+                    img_right = None
+                if not use_realsense:
+                    img_realsense = None
 
                 obs_waist = robot_obs["obs_waist"]
                 obs_head  = robot_obs["obs_head"]
