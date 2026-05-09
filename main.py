@@ -32,9 +32,14 @@ from sharedmemory.shm_schema import (
     MASK_CONTROL_LAYOUT, DEPTH_MAP, TELEOP_CONFIG, QUEST_CONTROLLER,
     HAND_MAPPING, CAMERA_MAPPING, VR_INPUT_MAPPING,
 )
+# NOTE: worker_vr / television / Vuer imports are deferred into
+# get_worker_specs() because the params-proto library (a Vuer
+# transitive dep) hijacks the global argparse at module-load time --
+# importing worker_vr here makes `python main.py --help` print Vuer's
+# CLI instead of ours. Loading it inside get_worker_specs() keeps
+# argparse owned by us.
 from gui.ui_launcher import run_ui
 from workers.worker_record import worker_record
-from workers.worker_vr import worker_vr
 from workers.keyboard_listener import keyboard_listener
 
 os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = " ".join([
@@ -205,6 +210,8 @@ def get_worker_specs(args, events, locks, shm_names):
                'name': 'WORKER_RECORD'}]
 
     # ---- Common: VR / GUI / keyboard --------------------------------
+    # worker_vr import는 여기서 (vuer/params-proto 가 argparse 가로채는 것 회피)
+    from workers.worker_vr import worker_vr
     specs += [
         {'target': worker_vr,         'args': (events, shm_names, locks, args.vr_input),
          'name': 'WORKER_VR'},
