@@ -124,6 +124,12 @@ def parse_args():
                         choices=list(VR_INPUT_MAPPING.keys()),
                         default='hand',
                         help='Quest3 input mode (hand tracking vs motion controller)')
+    # Inspire thumb 사전 자세 (vr_input=controller 일 때만 사용; 손가락 4개는 trigger로 토글)
+    # 값 범위: 0.0(굽힘/안쪽) ~ 1.0(펼침/바깥쪽). 물체에 따라 잡기 편한 자세를 사전 설정.
+    parser.add_argument('--thumb-bend', dest='thumb_bend', type=float, default=0.5,
+                        help='Inspire thumb bend angle (controller mode only, 0..1)')
+    parser.add_argument('--thumb-yaw',  dest='thumb_yaw',  type=float, default=0.5,
+                        help='Inspire thumb yaw   angle (controller mode only, 0..1)')
     return parser.parse_args()
 
 
@@ -171,8 +177,9 @@ def get_worker_specs(args, events, locks, shm_names):
         from workers.worker_hand_ctrl import worker_hand_ctrl
         from workers.worker_hand_dds  import worker_hand_r_dds, worker_hand_l_dds
         specs += [
-            {'target': worker_hand_ctrl, 'args': (events, shm_names, locks, args.vr_input),
-             'name': 'WORKER_HAND'},
+            {'target': worker_hand_ctrl,
+             'args':   (events, shm_names, locks, args.vr_input, args.thumb_bend, args.thumb_yaw),
+             'name':   'WORKER_HAND'},
             {'target': worker_hand_r_dds, 'args': ('192.168.123.210', 'r', 'Right-hand process', shm_names, locks),
              'name': 'WORKER_HAND_R_DDS'},
             {'target': worker_hand_l_dds, 'args': ('192.168.123.211', 'l', 'Left-hand process',  shm_names, locks),

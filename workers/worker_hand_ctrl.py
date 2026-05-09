@@ -27,9 +27,11 @@ def _events_snapshot(shared_event, hand_initialized: bool) -> EventsSnapshot:
         select_pressed = False
     )
 
-def worker_hand_ctrl(shared_event, shm_name, shared_lock, vr_input="hand"):
-    """vr_input: 'hand' (current dex_retargeting) or 'controller' (Phase 2 trigger toggle).
-    Phase 1-B에서는 인자만 받고 동작은 그대로 둔다 — 분기는 Phase 2에서 추가."""
+def worker_hand_ctrl(shared_event, shm_name, shared_lock,
+                     vr_input="hand", thumb_bend=0.5, thumb_yaw=0.5):
+    """vr_input='hand' uses dex_retargeting from VR keypoints; vr_input='controller'
+    uses Quest3 controller trigger as a grasp/release toggle and thumb_bend/thumb_yaw
+    as a pre-set thumb pose (Inspire motor 4 / 5 normalized 0..1)."""
     #Set SharedMemory
     television_shm = SharedMemoryManager(TELEVISION, shared_lock["television_lock"], shm_name["television_shm"])
     freq_shm = SharedMemoryManager(WORKER_FREQ, shared_lock["freq_lock"], shm_name["freq_shm"])
@@ -86,9 +88,11 @@ def worker_hand_ctrl(shared_event, shm_name, shared_lock, vr_input="hand"):
                         dual_hand_data_lock = Lock()
                         dual_hand_state_array = Array('d', 12, lock = False)   # [output] current left, right hand state(12) data.
                         dual_hand_action_array = Array('d', 12, lock = False)  # [output] current left, right hand action(12) data.
-                        hand_ctrl = Inspire_Controller(shm_name, shared_lock,left_hand_array, right_hand_array, \
-                                                    dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array, \
-                                                        fps = 100.0, Unit_Test = False)
+                        hand_ctrl = Inspire_Controller(shm_name, shared_lock, left_hand_array, right_hand_array,
+                                                    dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array,
+                                                    fps=100.0, Unit_Test=False,
+                                                    vr_input=vr_input,
+                                                    thumb_bend=thumb_bend, thumb_yaw=thumb_yaw)
     
                         hand_initialized = True
                         logger_mp.info("[Hand_Ctrl] Hand controller initialized.")

@@ -9,7 +9,10 @@ from multiprocessing import Process, shared_memory, Array, Lock
 import traceback
 
 from sharedmemory.shmManager import SharedMemoryManager
-from sharedmemory.shm_schema import RECORD_MODE_LAYOUT
+from sharedmemory.shm_schema import RECORD_MODE_LAYOUT, QUEST_CONTROLLER
+
+# Trigger 토글 임계값 (controller 모드)
+_TRIGGER_THRESH = 0.5
 
 import logging_mp
 logger_mp = logging_mp.get_logger(__name__)
@@ -23,7 +26,15 @@ kTopicInspireState_R = "rt/inspire_hand/state/r"
 
 class Inspire_Controller:
     def __init__(self, shm_name, shared_lock, left_hand_array, right_hand_array, dual_hand_data_lock = None, dual_hand_state_array = None, \
-                 dual_hand_action_array = None, fps = 100.0, Unit_Test = False):
+                 dual_hand_action_array = None, fps = 100.0, Unit_Test = False,
+                 vr_input = "hand", thumb_bend = 0.5, thumb_yaw = 0.5):
+        """vr_input:
+            - "hand": dex_retargeting from VR hand keypoints (default).
+            - "controller": Quest3 controller trigger toggles grasp/release.
+              thumb_bend / thumb_yaw (0..1) set the thumb pose; finger 0..3
+              flip between fully open (1.0) and fully closed (0.0) on each
+              rising edge of the corresponding controller's trigger.
+        """
         logger_mp.info("Initialize Inspire_Controller...")
 
         import yaml
@@ -31,7 +42,18 @@ class Inspire_Controller:
         ChannelFactoryInitialize(0, cfg["network_interface"])
         self.fps = fps
         self.Unit_Test = Unit_Test
+        self.vr_input = vr_input
+        self.thumb_bend = float(np.clip(thumb_bend, 0.0, 1.0))
+        self.thumb_yaw  = float(np.clip(thumb_yaw,  0.0, 1.0))
+
         self.record_mode_shm = SharedMemoryManager(RECORD_MODE_LAYOUT, shared_lock["record_lock"], shm_name["record_mode_shm"])
+        # Controller 모드일 때만 attach
+        self.quest_controller_shm = None
+        if self.vr_input == "controller":
+            self.quest_controller_shm = SharedMemoryManager(
+                QUEST_CONTROLLER, shared_lock["quest_controller_lock"],
+                shm_name["quest_controller_shm"],
+            )
 
         self.hand_retargeting = HandRetargeting(HandType.INSPIRE_HAND)
 
@@ -125,6 +147,13 @@ class Inspire_Controller:
         self.running = True
         left_q_target  = np.full(Inspire_Num_Motors, 1.0)
         right_q_target = np.full(Inspire_Num_Motors, 1.0)
+
+        # Controller-mode toggle state (per-side latched grasp; True == closed).
+        grasp_l = False
+        grasp_r = False
+        prev_trig_l = False
+        prev_trig_r = False
+
         try:
             while self.running:
 
@@ -134,60 +163,89 @@ class Inspire_Controller:
                 deploy = mode_data["deploy"]
 
                 start_time = time.time()
-                # get dual hand state
-                left_hand_mat  = np.array(left_hand_array[:]).reshape(5, 3).copy()
-                right_hand_mat = np.array(right_hand_array[:]).reshape(5, 3).copy()
 
-                # Read left and right q_state from shared arrays
+                # Read left and right q_state from shared arrays (always)
                 state_data = np.concatenate((np.array(left_hand_state_array[:]), np.array(right_hand_state_array[:])))
                 state_data = state_data / 1000.0  # milli-radian -> radian 변환
 
+                # =====================================================
+                # vr_input == "controller": trigger toggle -> prefab q
+                # =====================================================
+                if self.vr_input == "controller" and self.quest_controller_shm is not None:
+                    cd = self.quest_controller_shm.read_data()
+                    trig_l = float(cd["left_trigger"])  >= _TRIGGER_THRESH
+                    trig_r = float(cd["right_trigger"]) >= _TRIGGER_THRESH
 
-                if not np.all(right_hand_mat == 0.0) and not np.all(left_hand_mat[4] == np.array([-0.8, 0.3, 0.15])): # if hand data has been initialized.
-                    ref_left_value = left_hand_mat#[inspire_tip_indices]
-                    ref_right_value = right_hand_mat#[inspire_tip_indices]
+                    # Rising-edge toggle: 한 번 누를 때마다 grasp <-> release
+                    if trig_l and not prev_trig_l:
+                        grasp_l = not grasp_l
+                        logger_mp.info(f"[Inspire] LEFT trigger toggle -> {'GRASP' if grasp_l else 'RELEASE'}")
+                    if trig_r and not prev_trig_r:
+                        grasp_r = not grasp_r
+                        logger_mp.info(f"[Inspire] RIGHT trigger toggle -> {'GRASP' if grasp_r else 'RELEASE'}")
+                    prev_trig_l = trig_l
+                    prev_trig_r = trig_r
 
-                    left_q_target  = self.hand_retargeting.left_retargeting.retarget(ref_left_value)[self.hand_retargeting.left_dex_retargeting_to_hardware]
-                    right_q_target = self.hand_retargeting.right_retargeting.retarget(ref_right_value)[self.hand_retargeting.right_dex_retargeting_to_hardware]
-                                
+                    # home 명령 시 모두 release 로 강제
+                    if home:
+                        grasp_l = False
+                        grasp_r = False
 
-                    def normalize(val, min_val, max_val):
-                        return np.clip((max_val - val) / (max_val - min_val), 0.0, 1.0)
+                    # Build q_targets:
+                    #   idx 0..3 = pinky/ring/middle/index proximal
+                    #     normalized 0(closed) ~ 1(open). grasp -> 0, release -> 1.
+                    #   idx 4 = thumb bend (사용자 사전 설정)
+                    #   idx 5 = thumb yaw (사용자 사전 설정)
+                    finger_l = 0.0 if grasp_l else 1.0
+                    finger_r = 0.0 if grasp_r else 1.0
+                    left_q_target  = np.array([finger_l, finger_l, finger_l, finger_l, self.thumb_bend, self.thumb_yaw], dtype=np.float64)
+                    right_q_target = np.array([finger_r, finger_r, finger_r, finger_r, self.thumb_bend, self.thumb_yaw], dtype=np.float64)
 
-                    for idx in range(Inspire_Num_Motors):
-                        if idx <= 3:
-                            left_q_target[idx]  = normalize(left_q_target[idx], 0.0, 1.7)
-                            right_q_target[idx] = normalize(right_q_target[idx], 0.0, 1.7)
-                        elif idx == 4:
-                            left_q_target[idx]  = normalize(left_q_target[idx], 0.0, 0.5)
-                            right_q_target[idx] = normalize(right_q_target[idx], 0.0, 0.5)
-                        elif idx == 5:
-                            left_q_target[idx]  = normalize(left_q_target[idx], -0.1, 1.3)
-                            right_q_target[idx] = normalize(right_q_target[idx], -0.1, 1.3)
+                # =====================================================
+                # vr_input == "hand": existing dex_retargeting path
+                # =====================================================
+                else:
+                    left_hand_mat  = np.array(left_hand_array[:]).reshape(5, 3).copy()
+                    right_hand_mat = np.array(right_hand_array[:]).reshape(5, 3).copy()
 
-                # get dual hand action
-                else : 
-                    left_q_target  = np.full(Inspire_Num_Motors, 1.0)
-                    right_q_target = np.full(Inspire_Num_Motors, 1.0)
+                    if not np.all(right_hand_mat == 0.0) and not np.all(left_hand_mat[4] == np.array([-0.8, 0.3, 0.15])):
+                        ref_left_value  = left_hand_mat
+                        ref_right_value = right_hand_mat
 
-                action_data = np.concatenate((left_q_target, right_q_target))    
+                        left_q_target  = self.hand_retargeting.left_retargeting.retarget(ref_left_value)[self.hand_retargeting.left_dex_retargeting_to_hardware]
+                        right_q_target = self.hand_retargeting.right_retargeting.retarget(ref_right_value)[self.hand_retargeting.right_dex_retargeting_to_hardware]
+
+                        def normalize(val, min_val, max_val):
+                            return np.clip((max_val - val) / (max_val - min_val), 0.0, 1.0)
+
+                        for idx in range(Inspire_Num_Motors):
+                            if idx <= 3:
+                                left_q_target[idx]  = normalize(left_q_target[idx], 0.0, 1.7)
+                                right_q_target[idx] = normalize(right_q_target[idx], 0.0, 1.7)
+                            elif idx == 4:
+                                left_q_target[idx]  = normalize(left_q_target[idx], 0.0, 0.5)
+                                right_q_target[idx] = normalize(right_q_target[idx], 0.0, 0.5)
+                            elif idx == 5:
+                                left_q_target[idx]  = normalize(left_q_target[idx], -0.1, 1.3)
+                                right_q_target[idx] = normalize(right_q_target[idx], -0.1, 1.3)
+                    else:
+                        left_q_target  = np.full(Inspire_Num_Motors, 1.0)
+                        right_q_target = np.full(Inspire_Num_Motors, 1.0)
+
+                action_data = np.concatenate((left_q_target, right_q_target))
                 if dual_hand_state_array and dual_hand_action_array:
                     with dual_hand_data_lock:
-                        dual_hand_state_array[:] = state_data
+                        dual_hand_state_array[:]  = state_data
                         dual_hand_action_array[:] = action_data
 
-                # logger_mp.info("\n=== [DEBUG] Sending DDS Command ===")
                 if not replay and not deploy:
-                    right_q_target =np.array([1,1,1,1,1,1])
-
                     self.ctrl_dual_hand(left_q_target, right_q_target)
-
 
                 current_time = time.time()
                 time_elapsed = current_time - start_time
-                sleep_time = max(0, (1 / self.fps) - time_elapsed)
+                sleep_time   = max(0, (1 / self.fps) - time_elapsed)
                 time.sleep(sleep_time)
-                
+
         except KeyboardInterrupt:
             logger_mp.error("KeyboardInterrupt, exiting program...")
         except Exception as e:
@@ -196,7 +254,12 @@ class Inspire_Controller:
 
         finally:
             logger_mp.info("Inspire_Controller has been closed.")
-            self.record_mode_shm.worker_close()         
+            self.record_mode_shm.worker_close()
+            if self.quest_controller_shm is not None:
+                try:
+                    self.quest_controller_shm.worker_close()
+                except Exception:
+                    pass
 
 class Inspire_Right_Hand_JointIndex(IntEnum):
     kRightHandPinky = 0
