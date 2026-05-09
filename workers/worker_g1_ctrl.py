@@ -10,7 +10,7 @@ from utils.rate import Rate
 
 from sharedmemory.shmManager import SharedMemoryManager
 from sharedmemory.shm_schema import (
-    WORKER_FREQ, RECORD_MODE_LAYOUT, ROBOT_ACTION, ROBOT_OBS, ROBOT_AMO_OBS
+    WORKER_FREQ, RECORD_MODE_LAYOUT, ROBOT_ACTION, ROBOT_OBS
 )
 
 from g1_control.g1_whole_control import G1_29_ArmController
@@ -42,7 +42,6 @@ class G1CtrlWorker(DualRateWorker):
         self.record_mode_shm  = SharedMemoryManager(RECORD_MODE_LAYOUT, shared_lock["record_lock"],       shm_name["record_mode_shm"])
         self.robot_action_shm = SharedMemoryManager(ROBOT_ACTION,       shared_lock["robot_action_lock"], shm_name["robot_action_shm"])
         self.robot_obs_shm    = SharedMemoryManager(ROBOT_OBS,          shared_lock["robot_obs_lock"],    shm_name["robot_obs_shm"])
-        self.robot_amo_obs_shm    = SharedMemoryManager(ROBOT_AMO_OBS,          shared_lock["robot_amo_obs_lock"],    shm_name["robot_amo_obs_shm"])
 
         # ── G1/Head 컨트롤 ────────────────────────────────
         self.g1_initialized = False
@@ -60,10 +59,6 @@ class G1CtrlWorker(DualRateWorker):
         self._buf_waist_dq= np.empty(3,  dtype=np.float32)
         self._buf_arm_q   = np.empty(14, dtype=np.float32)
         self._buf_arm_dq  = np.empty(14, dtype=np.float32)
-        self._buf_amo_q   = np.empty(23, dtype=np.float32)
-        self._buf_amo_dq  = np.empty(23, dtype=np.float32)
-        self._buf_quat    = np.empty(4, dtype=np.float32)
-        self._buf_gyro    = np.empty(3, dtype=np.float32)
 
 
         logger_mp.info("[G1_Ctrl] FSM start: WAIT_CONNECT")
@@ -172,17 +167,12 @@ class G1CtrlWorker(DualRateWorker):
         obs_leg   = self.g1_ctrl.get_current_leg_q(out=self._buf_leg_q)
         obs_waist = self.g1_ctrl.get_current_waist_q(out=self._buf_waist_q)
         obs_arm   = self.g1_ctrl.get_current_arm_q(out=self._buf_arm_q)
-        
-        # gr00t_kistar 모드에서는 다이나믹셀 관측 읽기 생략
+
         if self.d_ctrl is not None:
             obs_dxl   = self.d_ctrl.get_current_motor_q()
-            obs_head  = np.array([ self.d_ctrl.dxl_tick_to_rad(x) for x in obs_dxl ],dtype=np.float32)
+            obs_head  = np.array([ self.d_ctrl.dxl_tick_to_rad(x) for x in obs_dxl ], dtype=np.float32)
         else:
-            obs_head  = np.zeros(2, dtype=np.float32)  # gr00t_kistar 모드에서는 0으로 채움
-
-        amo_q     = self.g1_ctrl.get_obs_motor_q(out=self._buf_amo_q)
-        amo_dq    = self.g1_ctrl.get_obs_motor_dq(out=self._buf_amo_dq)
-        quat, ang_vel = self.g1_ctrl.get_imu_state_data(out_quat=self._buf_quat, out_gyro=self._buf_gyro)
+            obs_head  = np.zeros(2, dtype=np.float32)
 
         # SHM 쓰기
         self.robot_obs_shm.write_data(
@@ -190,12 +180,6 @@ class G1CtrlWorker(DualRateWorker):
             obs_waist=obs_waist,
             obs_head=obs_head,
             obs_arm=obs_arm
-        )
-        self.robot_amo_obs_shm.write_data(
-            amo_q = amo_q,
-            amo_dq = amo_dq,
-            quat = quat,
-            ang_vel = ang_vel,
         )
 
     # 리소스 정리
@@ -210,7 +194,6 @@ class G1CtrlWorker(DualRateWorker):
             self.robot_action_shm.worker_close()
             self.robot_obs_shm.worker_close()
             self.record_mode_shm.worker_close()
-            self.robot_amo_obs_shm.worker_close()
         finally:
             logger_mp.info("[G1_Ctrl] 종료 및 SHM 정리 완료")
 

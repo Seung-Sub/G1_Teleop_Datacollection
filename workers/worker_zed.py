@@ -221,7 +221,7 @@ def worker_zed(shared_event, shm_name, shared_lock):
                 # 공유 메모리 저장을 위해 480x640 크기로 리사이즈
                 depth_resized = cv2.resize(depth_image_float, (640, 480), interpolation=cv2.INTER_AREA)
                 
-                # 뎁스맵 공유 메모리에 쓰기: 다른 워커(예: worker_delopy_policy_kistar)에서 사용
+                # 뎁스맵 공유 메모리에 쓰기 (deploy 등 다른 워커에서 사용)
                 depth_map_shm.write_data(depth_map=depth_resized)
 
                 # [추가] Matplotlib으로 깊이 맵 실시간 플롯: 디버깅용 시각화
@@ -370,7 +370,7 @@ def worker_zed(shared_event, shm_name, shared_lock):
                 mask_right_flat = mask_r.astype(np.float64).flatten()  # 오른쪽 마스크 평탄화
 
 
-                # [추가] 작업 공간 마스크를 공유 메모리에 저장: 다른 워커(예: worker_delopy_policy_kistar)에서 사용
+                # [추가] 작업 공간 마스크를 공유 메모리에 저장 (deploy 등 다른 워커에서 사용)
                 # 작업 공간 마스크를 공유 메모리에 저장
                 workspace_mask_shm.write_data(
                     mask_left_flat=mask_left_flat,

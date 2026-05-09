@@ -6,22 +6,10 @@ import numpy as np
 MODE_MAPPING = {
     'teleop': 0,
     'gr00t': 1,
-    'amo': 2,
-    'gr00t_zed': 3,
-    'kistar_teleop': 4,
-    'kistar_only': 5,
-    'kistar_inspire_teleop': 6
+    'gr00t_zed': 2,
 }
 
-MODE_MAPPING_INV = {
-    0: 'teleop',
-    1: 'gr00t',
-    2: 'amo',
-    3: 'gr00t_zed',
-    4: 'kistar_teleop',
-    5: 'kistar_only',
-    6: 'kistar_inspire_teleop'
-}
+MODE_MAPPING_INV = {v: k for k, v in MODE_MAPPING.items()}
 
 
 ROBOT_OBS = [
@@ -41,32 +29,6 @@ ROBOT_ACTION = [
     ("action_arm",        (14,),    np.float64),
     ("action_arm_tauff",        (14,),    np.float64),
     ("action_hand",        (12,),    np.float64),
-]
-
-ROBOT_AMO_OBS = [
-    ("amo_q",        (23,),    np.float64),
-    ("amo_dq",        (23,),    np.float64),
-    ("quat",        (4,),    np.float64),
-    ("ang_vel",        (3,),    np.float64),
-]
-
-ROBOT_AMO_INPUT = [
-    ("pelvis_pose",        (7,),    np.float64),    # xyz, xyzw
-    ("pelvis_height",        (1,),    np.float64),
-    ("torso_quat",        (4,),    np.float64),
-    ("vel_command",        (3,),    np.float64),
-]
-
-# KISTAR Hand Action 전용 스키마 (전송된 제어 명령 저장)
-KISTAR_HAND_ACTION = [
-    ("hand_action",        (16,),   np.float32),    # 16개 조인트 액션 (action - 전송된 값)
-]
-
-# ASUS NUC로부터 받는 KISTAR Hand 데이터
-KISTAR_HAND_RECEIVED = [
-    ("hand_q_pos",         (16,),   np.float32),    # 16개 조인트 위치
-    ("hand_kinesthetic",         (12,),   np.float32),    # 16개 조인트 위치
-    ("play_cnt",           (),      np.int32),      # 플레이 카운트
 ]
 
 GR00T_TASK_LAYOUT = [

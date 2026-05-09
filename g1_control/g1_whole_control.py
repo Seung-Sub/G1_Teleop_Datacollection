@@ -291,15 +291,6 @@ class G1_29_ArmController:
         """Return current state dq of the leg motors."""
         return self._read_from_indices(G1_29_JointLegIndex, "dq", out=out)
 
-    # --- AMO 관측 ---
-    def get_obs_motor_q(self, out=None):
-        """Return current AMO observation q."""
-        return self._read_from_indices(AMO_Observation_Index, "q", out=out)
-
-    def get_obs_motor_dq(self, out=None):
-        """Return current AMO observation dq."""
-        return self._read_from_indices(AMO_Observation_Index, "dq", out=out)
-
     # IMU도 버퍼 재사용 옵션 추가 (선택)
     def get_imu_state_data(self, out_quat=None, out_gyro=None):
         """
@@ -503,40 +494,6 @@ class G1_29_JointLegIndex(IntEnum):
     kRightKnee = 9
     kRightAnklePitch = 10
     kRightAnkleRoll = 11
-
-class AMO_Observation_Index(IntEnum):
-    # Left leg
-    kLeftHipPitch = 0
-    kLeftHipRoll = 1
-    kLeftHipYaw = 2
-    kLeftKnee = 3
-    kLeftAnklePitch = 4
-    kLeftAnkleRoll = 5
-
-    # Right leg
-    kRightHipPitch = 6
-    kRightHipRoll = 7
-    kRightHipYaw = 8
-    kRightKnee = 9
-    kRightAnklePitch = 10
-    kRightAnkleRoll = 11
-    
-    # Waist
-    kWaistYaw = 12
-    kWaistRoll = 13
-    kWaistPitch = 14
-
-    # Left arm
-    kLeftShoulderPitch = 15
-    kLeftShoulderRoll = 16
-    kLeftShoulderYaw = 17
-    kLeftElbow = 18
-
-    # Right arm
-    kRightShoulderPitch = 22
-    kRightShoulderRoll = 23
-    kRightShoulderYaw = 24
-    kRightElbow = 25
 
 class G1_29_JointIndex(IntEnum):
     # Left leg

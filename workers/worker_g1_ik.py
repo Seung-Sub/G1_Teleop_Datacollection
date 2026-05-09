@@ -5,28 +5,16 @@ import numpy as np
 from utils.state import State, EventsSnapshot, next_state
 from utils.rate import Rate
 
-from multiprocessing import shared_memory, Array, Lock
 from sharedmemory.shmManager import SharedMemoryManager
-from sharedmemory.shm_schema import TELEVISION, RECORD_MODE_LAYOUT, WORKER_FREQ, RECORD_EPISODE_LAYOUT, RECORD_TASK_LAYOUT, ROBOT_ACTION, ROBOT_OBS,ROBOT_AMO_INPUT
+from sharedmemory.shm_schema import TELEVISION, RECORD_MODE_LAYOUT, WORKER_FREQ, RECORD_EPISODE_LAYOUT, RECORD_TASK_LAYOUT, ROBOT_ACTION, ROBOT_OBS
 
-
-
+from g1_control.g1_ik import G1_29_ArmIK
 
 import pandas as pd
-from collections import deque
-from scipy.spatial.transform import Rotation as R
 
 import logging_mp
 logger_mp = logging_mp.get_logger(__name__)
 
-
-def pose7_to_T_scipy(pose_xyzw):
-    x, y, z, qx, qy, qz, qw = pose_xyzw
-    rot = R.from_quat([qx, qy, qz, qw])  # SciPy는 [x, y, z, w] 순서
-    T = np.eye(4)
-    T[:3, :3] = rot.as_matrix()
-    T[:3, 3]  = [x, y, z]
-    return T
 
 def _events_snapshot(shared_event, g1_initialized: bool) -> EventsSnapshot:
     return EventsSnapshot(
@@ -39,7 +27,7 @@ def _events_snapshot(shared_event, g1_initialized: bool) -> EventsSnapshot:
     )
 
 def worker_g1_ik(shared_event, shm_name, shared_lock, ctrl_mode):
-    
+
     #Set SharedMemory
     television_shm = SharedMemoryManager(TELEVISION, shared_lock["television_lock"], shm_name["television_shm"])
     freq_shm = SharedMemoryManager(WORKER_FREQ, shared_lock["freq_lock"], shm_name["freq_shm"])
@@ -48,7 +36,6 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, ctrl_mode):
     record_task_shm = SharedMemoryManager(RECORD_TASK_LAYOUT, shared_lock["record_lock"], shm_name["record_task_shm"])
     robot_action_shm = SharedMemoryManager(ROBOT_ACTION, shared_lock["robot_action_lock"], shm_name["robot_action_shm"])
     robot_obs_shm = SharedMemoryManager(ROBOT_OBS, shared_lock["robot_obs_lock"], shm_name["robot_obs_shm"])
-    robot_amo_input_shm = SharedMemoryManager(ROBOT_AMO_INPUT, shared_lock["robot_amo_input_lock"], shm_name["robot_amo_input_shm"])
 
     # 50Hz 주기로 실행 
     rate = Rate(50.0)
@@ -78,22 +65,11 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, ctrl_mode):
 
     base_left_pos = base_right_pos = base_head_pos = None
     T_L_init = T_R_init = T_H_init = None
-    base_pelvis_pos = None   # ✅ 추가: pelvis 기준 position
 
     first_loop = True
 
-
-
-
     state = State.WAIT_CONNECT
     logger_mp.info("[G1_IK] FSM start: WAIT_CONNECT")
-
-    if ctrl_mode =="amo":
-        amo_mode =True
-        from g1_control.g1_ik_amo import G1_29_ArmIK   # AMO 전용 IK 
-    else : 
-        amo_mode = False
-        from g1_control.g1_ik import G1_29_ArmIK       # 일반 IK 
 
     try:
         while True:
@@ -110,8 +86,8 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, ctrl_mode):
                 # set_g1이 올라오면 IK 초기화 1회 시도
                 if shared_event['set_g1'].is_set() and not g1_initialized:
                     try:
-                        # IK 솔버 초기화 
-                        g1_ik_solver = G1_29_ArmIK(amo_mode, True)
+                        # IK 솔버 초기화
+                        g1_ik_solver = G1_29_ArmIK(False, True)
                         g1_initialized = True
                         logger_mp.info("[G1_IK] IK solver initialized.")
                     except Exception as e:
@@ -132,18 +108,12 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, ctrl_mode):
                 mode = record_mode_shm.read_data()
                 home, replay, deploy = mode["home"], mode["replay"], mode["deploy"]
 
-                if first_loop:  
+                if first_loop:
                     vr_data = television_shm.read_data()
                     left_wrist, right_wrist, head_pose = vr_data["left_wrist_mat"], vr_data["right_wrist_mat"], vr_data["head_rmat"]
                     base_left_pos, base_right_pos, base_head_pos = left_wrist[:3,3].copy(), right_wrist[:3,3].copy(), head_pose[:3,3].copy()
-                    
+
                     T_L_init, T_R_init, T_H_init = g1_ik_solver.init_pose()
-
-                    if amo_mode:
-                        amo0 = robot_amo_input_shm.read_data()
-                        pelvis_pose0 = amo0["pelvis_pose"]          # [x, y, z, qx, qy, qz, qw]
-                        base_pelvis_pos = pelvis_pose0[:3].copy()   # 기준은 position만
-
 
                     set_home = True
                     first_loop = False
@@ -173,24 +143,14 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, ctrl_mode):
                     current_head = robot_obs["obs_head"]
                     current_arm_q  = robot_obs["obs_arm"]
 
-                    if amo_mode: 
-                        amo_data = robot_amo_input_shm.read_data()
-                        pelvis_pose = amo_data["pelvis_pose"]
-                    else:
-                        pelvis_pose = np.array([0.0,0.0,0.0, 0.0,0.0,0.0,1.0])
-
-                    if home: 
-                        # 현재 VR 위치를 기준점으로 저장 
+                    if home:
+                        # 현재 VR 위치를 기준점으로 저장
                         base_left_pos  = left_wrist[:3, 3].copy()
                         base_right_pos = right_wrist[:3, 3].copy()
                         base_head_pos  = head_pose[:3, 3].copy()
 
-                        # 로봇의 초기 자세도 저장 
-                        T_L_init, T_R_init,T_H_init = g1_ik_solver.init_pose()
-
-                        if amo_mode:
-                            base_pelvis_pos = amo_data["pelvis_pose"][:3].copy()
-
+                        # 로봇의 초기 자세도 저장
+                        T_L_init, T_R_init, T_H_init = g1_ik_solver.init_pose()
 
                         set_home = True
 
@@ -228,52 +188,22 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, ctrl_mode):
                         rel_head_pose[:3, :3] = R_H
                         rel_head_pose[:3,  3] = goal_p_H
 
-                        if amo_mode:
-                            # ✅ pelvis: pos는 상대, quat은 원본 사용
-                            pelvis_cur = amo_data["pelvis_pose"]  # [x,y,z,qx,qy,qz,qw]
-                            if base_pelvis_pos is not None:
-                                rel_pelvis_pos = pelvis_cur[:3] - base_pelvis_pos
-                            else:
-                                rel_pelvis_pos = pelvis_cur[:3]  # 안전망
-                            pelvis_pose_rel = np.concatenate((rel_pelvis_pos, pelvis_cur[3:7]))
-                            
-                        if amo_mode:
-                            current_lr_arm_qdml = np.concatenate((pelvis_pose_rel, current_waist_q, current_head, current_arm_q))
-                            pelvis_matrix = pose7_to_T_scipy(pelvis_pose_rel)
-                            sol_q, sol_tauff,pelvis_height, torso_quat = g1_ik_solver.solve_ik(pelvis_matrix, rel_left_wrist, rel_right_wrist,rel_head_pose,current_lr_arm_qdml)
-                        else:
-                            current_lr_arm_qdml = np.concatenate((current_waist_q, current_head, current_arm_q))                            
-                            sol_q, sol_tauff,pelvis_height, torso_quat = g1_ik_solver.solve_ik(rel_left_wrist, rel_right_wrist,rel_head_pose,current_lr_arm_qdml)
+                        current_lr_arm_qdml = np.concatenate((current_waist_q, current_head, current_arm_q))
+                        sol_q, sol_tauff, pelvis_height, torso_quat = g1_ik_solver.solve_ik(rel_left_wrist, rel_right_wrist, rel_head_pose, current_lr_arm_qdml)
 
                     else:
-                        # 절대 좌표 IK: VR 원본 데이터 직접 사용 
-                        if amo_mode:
-                            current_lr_arm_qdml = np.concatenate((pelvis_pose, current_waist_q, current_head, current_arm_q))
-                            pelvis_matrix = pose7_to_T_scipy(pelvis_pose)
-                            sol_q, sol_tauff, pelvis_height, torso_quat = g1_ik_solver.solve_ik(pelvis_matrix, left_wrist, right_wrist,ik_head_pose, current_lr_arm_qdml)
-                        else:
-                            current_lr_arm_qdml = np.concatenate((current_waist_q, current_head, current_arm_q))
-                            sol_q, sol_tauff, pelvis_height, torso_quat = g1_ik_solver.solve_ik(left_wrist, right_wrist,ik_head_pose, current_lr_arm_qdml)
+                        # 절대 좌표 IK: VR 원본 데이터 직접 사용
+                        current_lr_arm_qdml = np.concatenate((current_waist_q, current_head, current_arm_q))
+                        sol_q, sol_tauff, pelvis_height, torso_quat = g1_ik_solver.solve_ik(left_wrist, right_wrist, ik_head_pose, current_lr_arm_qdml)
 
-                    # IK를 푼 결과를 action에 전달 
-                    if ctrl_mode != "amo":
-                        robot_action_shm.write_data(
-                            action_waist=sol_q[:3],               # 허리 3개   
-                            action_waist_tauff=sol_tauff[:3],     
-                            action_head = sol_q[3:5],             # 머리 2개 
-                            action_arm=sol_q[5:],                 # 팔 14개 
-                            action_arm_tauff=sol_tauff[5:],
-                        )
-                    else:
-                        robot_action_shm.write_data(
-                            action_head = sol_q[10:12],
-                            action_arm=sol_q[12:26],
-                            action_arm_tauff=sol_tauff[11:25],
-                        )
-                        robot_amo_input_shm.write_data(
-                            pelvis_height = pelvis_height,
-                            torso_quat = torso_quat
-                        )
+                    # IK를 푼 결과를 action에 전달
+                    robot_action_shm.write_data(
+                        action_waist=sol_q[:3],               # 허리 3개
+                        action_waist_tauff=sol_tauff[:3],
+                        action_head=sol_q[3:5],               # 머리 2개
+                        action_arm=sol_q[5:],                 # 팔 14개
+                        action_arm_tauff=sol_tauff[5:],
+                    )
 
                 if replay and not replay_demo_init :
                     logger_mp.info(f"[replay init]")
@@ -343,24 +273,11 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, ctrl_mode):
                     idx = replay_frame_idx
                     sol_q = replay_g1_data[idx]
 
-                    if ctrl_mode == "amo":
-                        robot_action_shm.write_data(
-                            action_arm=sol_q[5:],
-                            action_head = sol_q[3:5]
-                        )
-                        current_lr_arm_motor_q = np.concatenate((pelvis_pose, sol_q))
-                        torso_quat = g1_ik_solver.get_torso_quat(current_lr_arm_motor_q)
-                        robot_amo_input_shm.write_data(
-                            pelvis_pose = pelvis_pose,
-                            pelvis_height = pelvis_pose[2],
-                            torso_quat = torso_quat
-                        )
-                    else:
-                        robot_action_shm.write_data(
-                            action_waist=sol_q[:3],
-                            action_arm=sol_q[5:],
-                            action_head = sol_q[3:5]
-                        )
+                    robot_action_shm.write_data(
+                        action_waist=sol_q[:3],
+                        action_arm=sol_q[5:],
+                        action_head=sol_q[3:5]
+                    )
 
                     # 진행률/로그는 인덱스가 변했을 때만 업데이트(로그 스팸 방지)
                     if idx != _last_written_idx:
@@ -403,4 +320,3 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, ctrl_mode):
         television_shm.worker_close(); robot_action_shm.worker_close(); robot_obs_shm.worker_close()
         record_mode_shm.worker_close(); freq_shm.worker_close()
         record_episode_shm.worker_close(); record_task_shm.worker_close()
-        robot_amo_input_shm.worker_close()

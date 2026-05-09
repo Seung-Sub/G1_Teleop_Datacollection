@@ -3,9 +3,8 @@ import time
 import numpy as np
 import logging
 
-from multiprocessing import shared_memory, Array, Lock
 from sharedmemory.shmManager import SharedMemoryManager
-from sharedmemory.shm_schema import WORKER_FREQ,  ROBOT_AMO_INPUT, ROBOT_OBS
+from sharedmemory.shm_schema import WORKER_FREQ, ROBOT_OBS
 
 
 from g1_control.g1_visualize_whole import G1_Visualization
@@ -50,7 +49,6 @@ def worker_g1_visualization(shared_event, shm_name, shared_lock):
 
     #Set SharedMemory
     freq_shm = SharedMemoryManager(WORKER_FREQ, shared_lock["freq_lock"], shm_name["freq_shm"])
-    robot_amo_input_shm = SharedMemoryManager(ROBOT_AMO_INPUT, shared_lock["robot_amo_input_lock"], shm_name["robot_amo_input_shm"])
     robot_obs_shm = SharedMemoryManager(ROBOT_OBS, shared_lock["robot_obs_lock"], shm_name["robot_obs_shm"])
 
     #Set loop frequency
@@ -147,9 +145,6 @@ def worker_g1_visualization(shared_event, shm_name, shared_lock):
             obs_arm = obs_data["obs_arm"]
             obs_hand = obs_data["obs_hand"]
 
-            pelvis_data = robot_amo_input_shm.read_data()
-            pelvis_pose = pelvis_data["pelvis_pose"]
-
             g1_vis.visual_leg_q(
                 left=obs_leg[:6],
                 right=obs_leg[6:]
@@ -173,9 +168,6 @@ def worker_g1_visualization(shared_event, shm_name, shared_lock):
             )
 
             g1_vis.visual_head_q(obs_head)
-
-            g1_vis.visual_base_q(pelvis_pose)
-        
 
             last_time = now
             count += 1
@@ -206,7 +198,6 @@ def worker_g1_visualization(shared_event, shm_name, shared_lock):
 
     logger_mp.info("[Meshcat] 종료 신호 수신. 종료합니다.")
     freq_shm.worker_close()
-    robot_amo_input_shm.worker_close()
     robot_obs_shm.worker_close()
     # if shared_event['set_g1'].is_set():
     #     g1_ik_solver.close_vis()    Meshcat

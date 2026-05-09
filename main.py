@@ -13,8 +13,7 @@ from sharedmemory.shm_schema import (
     CAMERA, TELEVISION, ARUCO_MARKERS, WORKSPACE_MASK,
     RECORD_TASK_LAYOUT, RECORD_EPISODE_LAYOUT, RECORD_MODE_LAYOUT, CURRENT_MODE_LAYOUT,
     LEFT_TOUCH_SENSOR_LAYOUT, RIGHT_TOUCH_SENSOR_LAYOUT,
-    WORKER_FREQ, GR00T_TASK_LAYOUT,ROBOT_OBS, ROBOT_ACTION, ROBOT_AMO_OBS, ROBOT_AMO_INPUT,
-    KISTAR_HAND_RECEIVED, KISTAR_HAND_ACTION,
+    WORKER_FREQ, GR00T_TASK_LAYOUT, ROBOT_OBS, ROBOT_ACTION,
     MASK_CONTROL_LAYOUT, DEPTH_MAP, MODE_MAPPING
 )
 from gui.ui_launcher import run_ui
@@ -30,8 +29,6 @@ os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = " ".join([
     "--enable-gpu-rasterization",
     "--use-gl=desktop",         # 안 되면 'egl' 또는 'swiftshader' 로 바꿔 테스트
     "--no-sandbox",
-    # "--use-gl=egl",
-    # "--use-gl=swiftshader",   # 최후의 수단(소프트웨어 렌더링)
 ])
 
 # Logging
@@ -40,27 +37,24 @@ logger_mp = logging_mp.get_logger(__name__)
 
 # Shared-memory configurations: layout constant, shm name, corresponding lock key
 SHM_CONFIG = {
-    'camera_shm':          (CAMERA,           'camera_shm',          'camera_lock'),
-    'television_shm':      (TELEVISION,       'television_shm',      'television_lock'),
-    'aruco_shm':           (ARUCO_MARKERS,    'aruco_shm',           'aruco_lock'),
-    'workspace_mask_shm':   (WORKSPACE_MASK,   'workspace_mask_shm',   'workspace_mask_lock'),
-    'record_task_shm':     (RECORD_TASK_LAYOUT,'record_task_shm',    'record_lock'),
-    'record_episode_shm':  (RECORD_EPISODE_LAYOUT,'record_episode_shm','record_lock'),
-    'record_mode_shm':     (RECORD_MODE_LAYOUT,'record_mode_shm',    'record_lock'),
-    'current_mode_shm':    (CURRENT_MODE_LAYOUT,'current_mode_shm',  'record_lock'),
-    'left_touch_shm':      (LEFT_TOUCH_SENSOR_LAYOUT,'left_touch_shm','left_touch_lock'),
-    'right_touch_shm':     (RIGHT_TOUCH_SENSOR_LAYOUT,'right_touch_shm','right_touch_lock'),
-    'freq_shm':            (WORKER_FREQ,      'freq_shm',            'record_lock'),
-    'gr00t_shm':           (GR00T_TASK_LAYOUT,'gr00t_shm',           'gr00t_lock'),
-    'robot_obs_shm':      (ROBOT_OBS,'robot_obs_shm',           'robot_obs_lock'),
-    'robot_action_shm':      (ROBOT_ACTION,'robot_action_shm',           'robot_action_lock'),
-    'robot_amo_obs_shm':      (ROBOT_AMO_OBS,'robot_amo_obs_shm',           'robot_amo_obs_lock'),
-    'robot_amo_input_shm':      (ROBOT_AMO_INPUT,'robot_amo_input_shm',           'robot_amo_input_lock'),
-    'kistar_hand_received_shm': (KISTAR_HAND_RECEIVED, 'kistar_hand_received_shm', 'kistar_hand_received_lock'),
-    'kistar_hand_action_shm': (KISTAR_HAND_ACTION, 'kistar_hand_action_shm', 'kistar_hand_action_lock'),
-    'mask_control_shm': (MASK_CONTROL_LAYOUT, 'mask_control_shm', 'record_lock'),
-    'depth_map_shm': (DEPTH_MAP, 'depth_map_shm', 'depth_map_lock'),
+    'camera_shm':          (CAMERA,                    'camera_shm',          'camera_lock'),
+    'television_shm':      (TELEVISION,                'television_shm',      'television_lock'),
+    'aruco_shm':           (ARUCO_MARKERS,             'aruco_shm',           'aruco_lock'),
+    'workspace_mask_shm':  (WORKSPACE_MASK,            'workspace_mask_shm',  'workspace_mask_lock'),
+    'record_task_shm':     (RECORD_TASK_LAYOUT,        'record_task_shm',     'record_lock'),
+    'record_episode_shm':  (RECORD_EPISODE_LAYOUT,     'record_episode_shm',  'record_lock'),
+    'record_mode_shm':     (RECORD_MODE_LAYOUT,        'record_mode_shm',     'record_lock'),
+    'current_mode_shm':    (CURRENT_MODE_LAYOUT,       'current_mode_shm',    'record_lock'),
+    'left_touch_shm':      (LEFT_TOUCH_SENSOR_LAYOUT,  'left_touch_shm',      'left_touch_lock'),
+    'right_touch_shm':     (RIGHT_TOUCH_SENSOR_LAYOUT, 'right_touch_shm',     'right_touch_lock'),
+    'freq_shm':            (WORKER_FREQ,               'freq_shm',            'record_lock'),
+    'gr00t_shm':           (GR00T_TASK_LAYOUT,         'gr00t_shm',           'gr00t_lock'),
+    'robot_obs_shm':       (ROBOT_OBS,                 'robot_obs_shm',       'robot_obs_lock'),
+    'robot_action_shm':    (ROBOT_ACTION,              'robot_action_shm',    'robot_action_lock'),
+    'mask_control_shm':    (MASK_CONTROL_LAYOUT,       'mask_control_shm',    'record_lock'),
+    'depth_map_shm':       (DEPTH_MAP,                 'depth_map_shm',       'depth_map_lock'),
 }
+
 
 def create_events():
     """Initialize and return a dict of multiprocessing Events."""
@@ -77,26 +71,21 @@ def create_events():
 def create_locks():
     """Initialize and return a dict of multiprocessing Locks."""
     return {
-        'robot_data_lock': Lock(),
-        'robot_lock':      Lock(),
-        'camera_lock':     Lock(),
-        'television_lock': Lock(),
-        'aruco_lock':      Lock(),
+        'robot_data_lock':     Lock(),
+        'robot_lock':          Lock(),
+        'camera_lock':         Lock(),
+        'television_lock':     Lock(),
+        'aruco_lock':          Lock(),
         'workspace_mask_lock': Lock(),
-        'record_lock':     Lock(),
-        'left_touch_lock': Lock(),
-        'right_touch_lock':Lock(),
-        'freq_lock':       Lock(),
-        'pelvis_lock':     Lock(),
-        'visual_lock':     Lock(),
-        'gr00t_lock':      Lock(),
+        'record_lock':         Lock(),
+        'left_touch_lock':     Lock(),
+        'right_touch_lock':    Lock(),
+        'freq_lock':           Lock(),
+        'visual_lock':         Lock(),
+        'gr00t_lock':          Lock(),
         'robot_obs_lock':      Lock(),
-        'robot_action_lock':      Lock(),
-        'robot_amo_obs_lock':      Lock(),
-        'robot_amo_input_lock':      Lock(),
-        'kistar_hand_received_lock':      Lock(),
-        'kistar_hand_action_lock':      Lock(),
-        'depth_map_lock': Lock(),
+        'robot_action_lock':   Lock(),
+        'depth_map_lock':      Lock(),
     }
 
 
@@ -116,7 +105,7 @@ def get_shm_names():
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        '--mode', choices=['teleop','kistar_teleop','kistar_inspire_teleop','amo','gr00t','gr00t_zed','gr00t_kistar','gr00t_kistar_inspire'],
+        '--mode', choices=['teleop', 'gr00t', 'gr00t_zed'],
         default='teleop',
         help='Select worker set to run'
     )
@@ -127,11 +116,11 @@ def get_worker_specs(mode, events, locks, shm_names):
     """Return a list of worker specs (target, args, name) based on the selected mode."""
     specs = []
 
-    # 모드 정보를 공유 메모리에 저장 (별도 공유 메모리 사용)
+    # 모드 정보를 공유 메모리에 저장
     current_mode_shm = SharedMemoryManager(CURRENT_MODE_LAYOUT, locks["record_lock"], shm_names["current_mode_shm"])
-    mode_int = MODE_MAPPING.get(mode, 0)  # 문자열 모드를 정수로 변환
+    mode_int = MODE_MAPPING.get(mode, 0)
     current_mode_shm.write_data(mode=np.int32(mode_int))
-    current_mode_shm.worker_close()  # 초기화 후 닫기 (워커들이 다시 열어서 사용)
+    current_mode_shm.worker_close()
 
     # 기존 record_mode_shm 초기화
     record_mode_shm = SharedMemoryManager(RECORD_MODE_LAYOUT, locks["record_lock"], shm_names["record_mode_shm"])
@@ -143,153 +132,46 @@ def get_worker_specs(mode, events, locks, shm_names):
         home=np.bool_(False),
         deploy=np.bool_(False)
     )
-    record_mode_shm.worker_close()  # 초기화 후 닫기 (워커들이 다시 열어서 사용)
+    record_mode_shm.worker_close()
 
-    ###### Tele-operation 코드
-    # 양손 Inspire hand 조종
+    ###### 양손 Inspire hand 텔레옵 (수집)
     if mode == 'teleop':
         from workers.worker_g1_ctrl import worker_g1_ctrl
         from workers.worker_g1_ik import worker_g1_ik
-        from workers.worker_vr import worker_vr
         from workers.worker_hand_ctrl import worker_hand_ctrl
         from workers.worker_zed import worker_zed
         from workers.worker_camera import worker_camera
         from workers.worker_hand_dds import worker_hand_r_dds, worker_hand_l_dds
 
         specs += [
-            # 데이터 기록
-            {'target': worker_record,     'args': (events, shm_names, locks), 'name':'WORKER_2'},
-            # G1 로봇 제어 (300Hz 관측, 50Hz 액션)
-            {'target': worker_g1_ctrl, 'args': (events, shm_names, locks, mode), 'name':'worker_g1_ctrl'},
-            # G1 로봇 IK (50Hz)
-            {'target': worker_g1_ik, 'args': (events, shm_names, locks, mode), 'name':'worker_g1_ik'},
-            # VR Hand IK (50Hz) - VR 데이터를 받아서 IK를 푸고 ZMQ로 전송
-            {'target': worker_vr_hand_ik, 'args': (events, shm_names, locks), 'name':'WORKER_VR_HAND_IK'},
-            # ZED 카메라 처리 (ArUco 포함)
-            {'target': worker_zed,               'args': (events, shm_names, locks), 'name':'WORKER_ZED'},
-            # RealSense 카메라 처리
-            {'target': worker_camera,            'args': (events, shm_names, locks), 'name':'WORKER_Realsense'}, 
-            # Inspire 양손 제어 (50Hz)
-            {'target': worker_hand_ctrl,         'args': (events, shm_names, locks), 'name':'WORKER_HAND'},           
-            # Inspire 양손 통신
-            {'target': worker_hand_r_dds, 'args': ('192.168.123.210','r','Right-hand process', shm_names, locks), 'name':'WORKER_HAND_R_DDS'},
-            {'target': worker_hand_l_dds, 'args': ('192.168.123.211','l','Left-hand process',  shm_names, locks), 'name':'WORKER_HAND_L_DDS'},
+            {'target': worker_record,    'args': (events, shm_names, locks),       'name': 'WORKER_RECORD'},
+            {'target': worker_g1_ctrl,   'args': (events, shm_names, locks, mode), 'name': 'worker_g1_ctrl'},
+            {'target': worker_g1_ik,     'args': (events, shm_names, locks, mode), 'name': 'worker_g1_ik'},
+            {'target': worker_zed,       'args': (events, shm_names, locks),       'name': 'WORKER_ZED'},
+            {'target': worker_camera,    'args': (events, shm_names, locks),       'name': 'WORKER_Realsense'},
+            {'target': worker_hand_ctrl, 'args': (events, shm_names, locks),       'name': 'WORKER_HAND'},
+            {'target': worker_hand_r_dds, 'args': ('192.168.123.210', 'r', 'Right-hand process', shm_names, locks), 'name': 'WORKER_HAND_R_DDS'},
+            {'target': worker_hand_l_dds, 'args': ('192.168.123.211', 'l', 'Left-hand process',  shm_names, locks), 'name': 'WORKER_HAND_L_DDS'},
         ]
-        
-    # 오른손 KISTAR Hand 단독 조종 (inspire 연결여부 상관x)
-    elif mode == 'kistar_teleop':
-        from workers.worker_g1_ctrl import worker_g1_ctrl
-        from workers.worker_g1_ik import worker_g1_ik
-        from workers.worker_vr import worker_vr
-        from workers.worker_vr_hand_ik import worker_vr_hand_ik
-        from workers.worker_zmq_kistar_sender import worker_zmq_kistar_sender
-        from workers.worker_zmq_kistar_receiver import worker_zmq_kistar_receiver
-        from workers.worker_zed import worker_zed
-        from workers.worker_camera import worker_camera
 
-        specs += [
-            # 데이터 기록
-            {'target': worker_record,     'args': (events, shm_names, locks), 'name':'WORKER_2'},
-            # G1 로봇 제어 (300Hz 관측, 50Hz 액션)
-            {'target': worker_g1_ctrl, 'args': (events, shm_names, locks, mode), 'name':'worker_g1_ctrl'},
-            # G1 로봇 IK (50Hz)
-            {'target': worker_g1_ik, 'args': (events, shm_names, locks, mode), 'name':'worker_g1_ik'},
-            # VR Hand IK (50Hz) - VR 데이터를 받아서 IK를 푸고 ZMQ로 전송
-            {'target': worker_vr_hand_ik, 'args': (events, shm_names, locks), 'name':'WORKER_VR_HAND_IK'},
-            # ZED 카메라 처리 (ArUco 포함)
-            {'target': worker_zed,               'args': (events, shm_names, locks), 'name':'WORKER_ZED'},
-            # RealSense 카메라 처리
-            {'target': worker_camera,            'args': (events, shm_names, locks), 'name':'WORKER_Realsense'},
-            # ZMQ KISTAR 송신 (50Hz) - ASUS NUC로 제어 명령 전송
-            {'target': worker_zmq_kistar_sender, 'args': (events, shm_names, locks), 'name':'WORKER_ZMQ_KISTAR_SENDER'},
-            # ZMQ KISTAR 수신 (200Hz) - ASUS NUC로부터 조인트 값 수신
-            {'target': worker_zmq_kistar_receiver, 'args': (events, shm_names, locks), 'name':'WORKER_ZMQ_KISTAR_RECEIVER'},
-            
-        ]
-        events['set_hand'].set()
-
-    # 오른손 KISTAR Hand + 왼손 Inspire Hand 동시 원격 조종
-    elif mode == 'kistar_inspire_teleop':
-        from workers.worker_g1_ctrl import worker_g1_ctrl
-        from workers.worker_g1_ik import worker_g1_ik
-        from workers.worker_vr import worker_vr
-        from workers.worker_vr_hand_ik import worker_vr_hand_ik
-        from workers.worker_zmq_kistar_sender import worker_zmq_kistar_sender
-        from workers.worker_zmq_kistar_receiver import worker_zmq_kistar_receiver
-        from workers.worker_zed import worker_zed
-        from workers.worker_camera import worker_camera
-        from workers.worker_hand_dds import worker_hand_l_dds
-        from workers.worker_left_hand_ctrl import worker_left_hand_ctrl
-
-        specs += [
-            # 데이터 기록
-            {'target': worker_record,     'args': (events, shm_names, locks), 'name':'WORKER_2'},
-            # G1 로봇 제어 (300Hz 관측, 50Hz 액션)
-            {'target': worker_g1_ctrl, 'args': (events, shm_names, locks, mode), 'name':'worker_g1_ctrl'},
-            # G1 로봇 IK (50Hz)
-            {'target': worker_g1_ik, 'args': (events, shm_names, locks, mode), 'name':'worker_g1_ik'},
-            # VR 데이터 수신 (50Hz)
-            {'target': worker_vr_hand_ik, 'args': (events, shm_names, locks), 'name':'WORKER_VR_HAND_IK'},
-            # ZED 카메라 처리 (ArUco 포함)
-            {'target': worker_zed,               'args': (events, shm_names, locks), 'name':'WORKER_ZED'},
-            # RealSense 카메라 처리
-            {'target': worker_camera,            'args': (events, shm_names, locks), 'name':'WORKER_Realsense'},
-            # ZMQ KISTAR 송신 (50Hz) - 오른손(KISTAR) 제어 명령 전송
-            {'target': worker_zmq_kistar_sender, 'args': (events, shm_names, locks), 'name':'WORKER_ZMQ_KISTAR_SENDER'},
-            # ZMQ KISTAR 수신 (200Hz) - 오른손(KISTAR) 조인트 값 수신
-            {'target': worker_zmq_kistar_receiver, 'args': (events, shm_names, locks), 'name':'WORKER_ZMQ_KISTAR_RECEIVER'},
-            # Inspire Hand 왼손 제어 (DDS 통신 이전 단계)
-            {'target': worker_left_hand_ctrl,         'args': (events, shm_names, locks), 'name':'WORKER_LEFT_HAND'},
-            # 왼손(Inspire) DDS 통신    
-            {'target': worker_hand_l_dds, 'args': ('192.168.123.211','l','Left-hand process',  shm_names, locks), 'name':'WORKER_HAND_L_DDS'},
-        ]
-        
-    # Mode-specific workers
-    elif mode == 'amo':        ## should be checked... -> outdated 내용
-        from workers.worker_g1_ctrl import worker_g1_ctrl
-        from workers.worker_g1_amo import worker_g1_amo
-        from workers.worker_g1_ik import worker_g1_ik
-        from workers.worker_hand_ctrl import worker_hand_ctrl
-        from workers.worker_zed import worker_zed
-        from workers.worker_zed_slam import worker_fusion
-        from workers.worker_camera import worker_camera
-        from workers.worker_hand_dds import worker_hand_r_dds, worker_hand_l_dds
-        # from workers.worker_g1_visualization import worker_g1_visualizations
-
-        specs += [
-            {'target': worker_g1_ctrl, 'args': (events, shm_names, locks, mode), 'name':'worker_g1_ctrl'},
-            {'target': worker_g1_amo, 'args': (events, shm_names, locks), 'name':'worker_g1_amo'},
-            {'target': worker_g1_ik, 'args': (events, shm_names, locks, mode), 'name':'worker_g1_ik'},
-            {'target': worker_hand_ctrl,         'args': (events, shm_names, locks), 'name':'WORKER_HAND'},
-            {'target': worker_zed,               'args': (events, shm_names, locks), 'name':'WORKER_ZED'},
-            {'target': worker_fusion,               'args': (events, shm_names, locks), 'name':'WORKER_ZED_SLAM'},
-            {'target': worker_camera,            'args': (events, shm_names, locks), 'name':'WORKER_Realsense'},
-            # {'target': worker_g1_visualization,            'args': (events, shm_names, locks), 'name':'WORKER_Visual'},
-            {'target': worker_hand_r_dds, 'args': ('192.168.123.210','r','Right-hand process', shm_names, locks), 'name':'WORKER_HAND_R_DDS'},
-            {'target': worker_hand_l_dds, 'args': ('192.168.123.211','l','Left-hand process',  shm_names, locks), 'name':'WORKER_HAND_L_DDS'},
-        ]
-    
-    ### gr00t deploy - Realsense camera + 양손 inspire
+    ### gr00t deploy - RealSense 단독 + 양손 Inspire
     elif mode == 'gr00t':
         from workers.worker_g1_ctrl import worker_g1_ctrl
         from workers.worker_g1_ik import worker_g1_ik
         from workers.worker_hand_ctrl import worker_hand_ctrl
         from workers.worker_camera import worker_camera
         from workers.worker_hand_dds import worker_hand_r_dds, worker_hand_l_dds
-        # from workers.worker_g1_visualization import worker_g1_visualization
-        from workers.worker_vr import worker_vr
 
         specs += [
-            {'target': worker_g1_ctrl, 'args': (events, shm_names, locks, mode), 'name':'worker_g1_ctrl'},
-            {'target': worker_g1_ik, 'args': (events, shm_names, locks, mode), 'name':'worker_g1_ik'},
-            {'target': worker_hand_ctrl,         'args': (events, shm_names, locks), 'name':'WORKER_HAND'},
-            {'target': worker_camera,            'args': (events, shm_names, locks), 'name':'WORKER_Realsense'},
-            # {'target': worker_g1_visualization,            'args': (events,  shm_names, locks), 'name':'WORKER_Visual'},
-            {'target': worker_hand_r_dds, 'args': ('192.168.123.210','r','Right-hand process', shm_names, locks), 'name':'WORKER_HAND_R_DDS'},
-            {'target': worker_hand_l_dds, 'args': ('192.168.123.211','l','Left-hand process',  shm_names, locks), 'name':'WORKER_HAND_L_DDS'},
-        ]        
-        
-    ### gr00t deploy - Zed camera + 양손 inspire
+            {'target': worker_g1_ctrl,   'args': (events, shm_names, locks, mode), 'name': 'worker_g1_ctrl'},
+            {'target': worker_g1_ik,     'args': (events, shm_names, locks, mode), 'name': 'worker_g1_ik'},
+            {'target': worker_hand_ctrl, 'args': (events, shm_names, locks),       'name': 'WORKER_HAND'},
+            {'target': worker_camera,    'args': (events, shm_names, locks),       'name': 'WORKER_Realsense'},
+            {'target': worker_hand_r_dds, 'args': ('192.168.123.210', 'r', 'Right-hand process', shm_names, locks), 'name': 'WORKER_HAND_R_DDS'},
+            {'target': worker_hand_l_dds, 'args': ('192.168.123.211', 'l', 'Left-hand process',  shm_names, locks), 'name': 'WORKER_HAND_L_DDS'},
+        ]
+
+    ### gr00t deploy - ZED + RealSense + 양손 Inspire
     elif mode == 'gr00t_zed':
         from workers.worker_g1_ctrl import worker_g1_ctrl
         from workers.worker_g1_ik import worker_g1_ik
@@ -297,97 +179,37 @@ def get_worker_specs(mode, events, locks, shm_names):
         from workers.worker_zed import worker_zed
         from workers.worker_camera import worker_camera
         from workers.worker_hand_dds import worker_hand_r_dds, worker_hand_l_dds
-        # from workers.worker_g1_visualization import worker_g1_visualization
 
         specs += [
-            {'target': worker_g1_ctrl, 'args': (events, shm_names, locks, mode), 'name':'worker_g1_ctrl'},
-            {'target': worker_g1_ik, 'args': (events, shm_names, locks, mode), 'name':'worker_g1_ik'},
-            {'target': worker_hand_ctrl,         'args': (events, shm_names, locks), 'name':'WORKER_HAND'},
-            {'target': worker_zed,               'args': (events, shm_names, locks), 'name':'WORKER_ZED'},
-            {'target': worker_camera,            'args': (events, shm_names, locks), 'name':'WORKER_Realsense'},
-            # {'target': worker_g1_visualization,            'args': (events,  shm_names, locks), 'name':'WORKER_Visual'},
-            {'target': worker_hand_r_dds, 'args': ('192.168.123.210','r','Right-hand process', shm_names, locks), 'name':'WORKER_HAND_R_DDS'},
-            {'target': worker_hand_l_dds, 'args': ('192.168.123.211','l','Left-hand process',  shm_names, locks), 'name':'WORKER_HAND_L_DDS'},
+            {'target': worker_g1_ctrl,   'args': (events, shm_names, locks, mode), 'name': 'worker_g1_ctrl'},
+            {'target': worker_g1_ik,     'args': (events, shm_names, locks, mode), 'name': 'worker_g1_ik'},
+            {'target': worker_hand_ctrl, 'args': (events, shm_names, locks),       'name': 'WORKER_HAND'},
+            {'target': worker_zed,       'args': (events, shm_names, locks),       'name': 'WORKER_ZED'},
+            {'target': worker_camera,    'args': (events, shm_names, locks),       'name': 'WORKER_Realsense'},
+            {'target': worker_hand_r_dds, 'args': ('192.168.123.210', 'r', 'Right-hand process', shm_names, locks), 'name': 'WORKER_HAND_R_DDS'},
+            {'target': worker_hand_l_dds, 'args': ('192.168.123.211', 'l', 'Left-hand process',  shm_names, locks), 'name': 'WORKER_HAND_L_DDS'},
         ]
 
-    ### gr00t deploy - Zed camera + 오른손 kistar hand 단독
-    elif mode == 'gr00t_kistar':
-        from workers.worker_g1_ctrl import worker_g1_ctrl
-        from workers.worker_g1_ik import worker_g1_ik
-        from workers.worker_hand_ctrl import worker_hand_ctrl
-        from workers.worker_vr import worker_vr
-        from workers.worker_vr_hand_ik import worker_vr_hand_ik
-        from workers.worker_zmq_kistar_sender import worker_zmq_kistar_sender
-        from workers.worker_zmq_kistar_receiver import worker_zmq_kistar_receiver
-        from workers.worker_zed import worker_zed
-        from workers.worker_camera import worker_camera
-        # from workers.worker_g1_visualization import worker_g1_visualization
-
-        specs += [
-            {'target': worker_g1_ctrl, 'args': (events, shm_names, locks, mode), 'name':'worker_g1_ctrl'},
-            {'target': worker_g1_ik, 'args': (events, shm_names, locks, mode), 'name':'worker_g1_ik'},
-            {'target': worker_zmq_kistar_sender, 'args': (events, shm_names, locks), 'name':'WORKER_ZMQ_KISTAR_SENDER'},
-            {'target': worker_zmq_kistar_receiver, 'args': (events, shm_names, locks), 'name':'WORKER_ZMQ_KISTAR_RECEIVER'},
-            {'target': worker_zed,               'args': (events, shm_names, locks), 'name':'WORKER_ZED'},
-            {'target': worker_camera,            'args': (events, shm_names, locks), 'name':'WORKER_Realsense'},
-            # {'target': worker_g1_visualization,            'args': (events,  shm_names, locks), 'name':'WORKER_Visual'},         
-        ]
-        events['set_hand'].set()    
-
-    ### gr00t deploy - Zed camera + 오른손 kistar, 왼손 Inspire
-    elif mode == 'gr00t_kistar_inspire':
-        from workers.worker_g1_ctrl import worker_g1_ctrl
-        from workers.worker_g1_ik import worker_g1_ik
-        from workers.worker_hand_ctrl import worker_hand_ctrl
-        from workers.worker_vr import worker_vr
-        from workers.worker_vr_hand_ik import worker_vr_hand_ik
-        from workers.worker_zmq_kistar_sender import worker_zmq_kistar_sender
-        from workers.worker_zmq_kistar_receiver import worker_zmq_kistar_receiver
-        from workers.worker_zed import worker_zed
-        from workers.worker_camera import worker_camera
-        # from workers.worker_g1_visualization import worker_g1_visualization
-        from workers.worker_hand_dds import worker_hand_l_dds, worker_hand_r_dds
-        from workers.worker_left_hand_ctrl import worker_left_hand_ctrl
-
-        specs += [
-            {'target': worker_g1_ctrl, 'args': (events, shm_names, locks, mode), 'name':'worker_g1_ctrl'},
-            {'target': worker_g1_ik, 'args': (events, shm_names, locks, mode), 'name':'worker_g1_ik'},
-            {'target': worker_zmq_kistar_sender, 'args': (events, shm_names, locks), 'name':'WORKER_ZMQ_KISTAR_SENDER'},
-            {'target': worker_zmq_kistar_receiver, 'args': (events, shm_names, locks), 'name':'WORKER_ZMQ_KISTAR_RECEIVER'},
-            {'target': worker_zed,               'args': (events, shm_names, locks), 'name':'WORKER_ZED'},
-            {'target': worker_camera,            'args': (events, shm_names, locks), 'name':'WORKER_Realsense'},
-            # {'target': worker_g1_visualization,            'args': (events,  shm_names, locks), 'name':'WORKER_Visual'},
-            {'target': worker_left_hand_ctrl,         'args': (events, shm_names, locks), 'name':'WORKER_LEFT_HAND'},
-            {'target': worker_hand_l_dds, 'args': ('192.168.123.211','l','Left-hand process',  shm_names, locks), 'name':'WORKER_HAND_L_DDS'},
-        ]
-        
     common_workers = [
-        # VR
-        {'target': worker_vr,         'args': (events, shm_names, locks), 'name':'WORKER_VR'},
-        # 그래픽 인터페이스
-        {'target': run_ui,            'args': (events, shm_names, locks), 'name':'UI'},
-        # 키보드 입력 리스너 
-        {'target': keyboard_listener,'args': (events,),                         'name':'KEYBOARD'},
+        # VR 입력 (Vuer Quest3)
+        {'target': worker_vr,         'args': (events, shm_names, locks), 'name': 'WORKER_VR'},
+        # GUI
+        {'target': run_ui,            'args': (events, shm_names, locks), 'name': 'UI'},
+        # 키보드 입력
+        {'target': keyboard_listener, 'args': (events,),                  'name': 'KEYBOARD'},
     ]
 
     specs += common_workers
 
     return specs
 
+
 AFFINITY = {
-    'worker_g1_ctrl': {20, 21},      # 컨트롤 전용
-    'WORKER_ZED':     {22},          # ZED 카메라 + ArUco 감지
-    'WORKER_VR':      {23},
-    'WORKER_HAND_R_DDS': {18},
-    'WORKER_HAND_L_DDS': {19},
-    'WORKER_Visual' : {17},
-    'worker_g1_amo' : {16},
-    'WORKER_KISTAR_HAND': {15},      # KISTAR Hand 전용
-    'WORKER_VR_HAND_IK': {13},       # VR Hand IK 전용
-    'WORKER_LEFT_HAND': {12},        # 왼손 Inspire 손 전용
-    'WORKER_ZMQ_KISTAR_SENDER': {14}, # ZMQ 송신 전용
-    'WORKER_ZMQ_KISTAR_RECEIVER': {11} # ZMQ 수신 전용
-    # UI/Record 등은 지정 안 하면 기본 풀(스케줄러가 분산)
+    'worker_g1_ctrl':       {20, 21},
+    'WORKER_ZED':           {22},
+    'WORKER_VR':            {23},
+    'WORKER_HAND_R_DDS':    {18},
+    'WORKER_HAND_L_DDS':    {19},
 }
 
 
