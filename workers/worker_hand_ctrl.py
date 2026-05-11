@@ -195,11 +195,9 @@ def worker_hand_ctrl(shared_event, shm_name, shared_lock,
                     hand_vec = replay_hand_data[idx]  # length 12
 
 
-                    # 2) 왼손/오른손으로 분할 (각 6개 joint)
+                    # 2) 왼손/오른손으로 분할 (각 6개 joint, inspire 양손)
                     left_q_target  = hand_vec[:6]
-                    # right_q_target = hand_vec[6:]
-
-                    right_q_target =np.array([0,0,0,0,0,0])
+                    right_q_target = hand_vec[6:12]
 
                     # 3) 컨트롤러에 전달
                     hand_ctrl.ctrl_dual_hand(left_q_target=left_q_target,
@@ -211,15 +209,15 @@ def worker_hand_ctrl(shared_event, shm_name, shared_lock,
                         pass
 
 
-                if deploy : 
+                if deploy:
+                    # deploy 모드: evaluate.py(외부 inference) 가 robot_action_shm.action_hand 에
+                    # 양손 12D 를 직접 쓰면 그대로 inspire 컨트롤러에 publish.
                     robot_dict = robot_action_shm.read_data()
                     hand_action = robot_dict["action_hand"]
                     hand_action = np.clip(hand_action, a_min=None, a_max=1.0)
 
                     left_q_target  = hand_action[:6]
-                    # right_q_target = hand_action[6:]
-
-                    right_q_target =np.array([0,0,0,0,0,0])
+                    right_q_target = hand_action[6:12]
                     hand_ctrl.ctrl_dual_hand(left_q_target=left_q_target,
                                             right_q_target=right_q_target)
 
