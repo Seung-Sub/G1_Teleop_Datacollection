@@ -183,12 +183,21 @@ def get_worker_specs(args, events, locks, shm_names):
         from workers.worker_hand_dds  import worker_hand_r_dds, worker_hand_l_dds
         specs += [
             {'target': worker_hand_ctrl,
-             'args':   (events, shm_names, locks, args.vr_input, args.thumb_bend, args.thumb_yaw),
+             'args':   (events, shm_names, locks, args.hand, args.vr_input, args.thumb_bend, args.thumb_yaw),
              'name':   'WORKER_HAND'},
+            # Inspire 전용 터치센서 Modbus DDS
             {'target': worker_hand_r_dds, 'args': ('192.168.123.210', 'r', 'Right-hand process', shm_names, locks),
              'name': 'WORKER_HAND_R_DDS'},
             {'target': worker_hand_l_dds, 'args': ('192.168.123.211', 'l', 'Left-hand process',  shm_names, locks),
              'name': 'WORKER_HAND_L_DDS'},
+        ]
+    elif args.hand == 'dex3':
+        from workers.worker_hand_ctrl import worker_hand_ctrl
+        specs += [
+            {'target': worker_hand_ctrl,
+             'args':   (events, shm_names, locks, args.hand, args.vr_input, args.thumb_bend, args.thumb_yaw),
+             'name':   'WORKER_HAND'},
+            # DEX3 는 별도 터치센서 DDS 가 없다 — worker_hand_*_dds 미동작
         ]
     else:
         raise ValueError(f"Unsupported hand hardware: {args.hand}")

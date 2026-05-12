@@ -414,13 +414,18 @@ class Gr00t_Inference:
         else:
             action_arm = arm_slice  # 14D
 
+        # action_hand SHM 은 14D (DEX3 max). 모델 출력이 12D(inspire) 인 경우 뒤 2개는 0.
+        hand14 = np.zeros(14, dtype=np.float64)
+        n = min(len(hand_action_np), 14)
+        hand14[:n] = hand_action_np[:n].astype(np.float64)
+
         self.robot_action_shm.write_data(
             action_waist     =action_waist.astype(np.float64),
             action_waist_tauff=np.zeros(3, dtype=np.float64),
             action_head      =action_head.astype(np.float64),
             action_arm       =action_arm.astype(np.float64),
             action_arm_tauff =np.zeros(14, dtype=np.float64),
-            action_hand      =hand_action_np[:12].astype(np.float64),
+            action_hand      =hand14,
         )
 
     # ----- UI trigger --------------------------------------------------------

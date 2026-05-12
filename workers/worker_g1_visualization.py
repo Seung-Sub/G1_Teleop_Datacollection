@@ -160,8 +160,9 @@ def worker_g1_visualization(shared_event, shm_name, shared_lock):
                 right=obs_arm[7:]
             )
 
-            hand_L12 = expand_hand_joints(obs_hand[:6])     # 왼손
-            hand_R12 = expand_hand_joints(obs_hand[6:])   # 오른손
+            # obs_hand 는 14D (DEX3 max). Inspire 양손 시 [:6]+[6:12] 가 의미 있는 6D 인자.
+            hand_L12 = expand_hand_joints(obs_hand[:6])
+            hand_R12 = expand_hand_joints(obs_hand[6:12])
             g1_vis.visual_hand_q(
                 right=hand_R12,
                 left=hand_L12

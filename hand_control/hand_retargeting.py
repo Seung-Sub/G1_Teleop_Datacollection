@@ -17,6 +17,9 @@ RetargetingConfig.set_default_urdf_dir(os.path.join(parent_dir, "hand_control"))
 class HandType(Enum):
     INSPIRE_HAND = "hand_control/inspire_hand/inspire_hand.yml"
     INSPIRE_HAND_Unit_Test = "hand_control/inspire_hand/inspire_hand.yml"
+    # Unitree DEX3 (양손 7DOF, dex_retargeting DexPilot 기반)
+    UNITREE_DEX3 = "hand_control/unitree_dex3_hand/unitree_dex3.yml"
+    UNITREE_DEX3_Unit_Test = "hand_control/unitree_dex3_hand/unitree_dex3.yml"
 
 class HandRetargeting:
     def __init__(self, hand_type: HandType):
@@ -67,6 +70,29 @@ class HandRetargeting:
                 )
                 self.right_dex_retargeting_to_hardware = (
                     [self.right_retargeting_joint_names.index(name) for name in self.right_inspire_api_joint_names]
+                    if self.right_retargeting else None
+                )
+
+            # Unitree DEX3 하드웨어 매핑 (xr_teleoperate 검증된 순서)
+            # Left  joint enum: Thumb0, Thumb1, Thumb2, Middle0, Middle1, Index0, Index1
+            # Right joint enum: Thumb0, Thumb1, Thumb2, Index0, Index1, Middle0, Middle1   (Middle/Index 순서 다름)
+            if hand_type in (HandType.UNITREE_DEX3, HandType.UNITREE_DEX3_Unit_Test):
+                self.left_dex3_api_joint_names = [
+                    'left_hand_thumb_0_joint', 'left_hand_thumb_1_joint', 'left_hand_thumb_2_joint',
+                    'left_hand_middle_0_joint', 'left_hand_middle_1_joint',
+                    'left_hand_index_0_joint',  'left_hand_index_1_joint',
+                ]
+                self.right_dex3_api_joint_names = [
+                    'right_hand_thumb_0_joint', 'right_hand_thumb_1_joint', 'right_hand_thumb_2_joint',
+                    'right_hand_index_0_joint',  'right_hand_index_1_joint',
+                    'right_hand_middle_0_joint', 'right_hand_middle_1_joint',
+                ]
+                self.left_dex_retargeting_to_hardware = (
+                    [self.left_retargeting_joint_names.index(name) for name in self.left_dex3_api_joint_names]
+                    if self.left_retargeting else None
+                )
+                self.right_dex_retargeting_to_hardware = (
+                    [self.right_retargeting_joint_names.index(name) for name in self.right_dex3_api_joint_names]
                     if self.right_retargeting else None
                 )
 

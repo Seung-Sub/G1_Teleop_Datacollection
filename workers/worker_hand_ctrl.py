@@ -5,8 +5,8 @@ import numpy as np
 from utils.state import State, EventsSnapshot, next_state
 from utils.rate import Rate
 
-from hand_control.robot_hand_inspire import Inspire_Controller
-
+# hand 컨트롤러는 hand 인자에 따라 lazy import — DEX3 는 unitree_hg DDS msg
+# 모듈을 필요로 하므로 Inspire 만 쓰는 환경에서도 import 가 깨지지 않게.
 from multiprocessing import shared_memory, Array, Lock
 from sharedmemory.shmManager import SharedMemoryManager
 from sharedmemory.shm_schema import TELEVISION, WORKER_FREQ, RECORD_MODE_LAYOUT, RECORD_EPISODE_LAYOUT, RECORD_TASK_LAYOUT, ROBOT_ACTION, ROBOT_OBS
@@ -28,10 +28,12 @@ def _events_snapshot(shared_event, hand_initialized: bool) -> EventsSnapshot:
     )
 
 def worker_hand_ctrl(shared_event, shm_name, shared_lock,
+                     hand="inspire",
                      vr_input="hand", thumb_bend=0.5, thumb_yaw=0.5):
-    """vr_input='hand' uses dex_retargeting from VR keypoints; vr_input='controller'
-    uses Quest3 controller trigger as a grasp/release toggle and thumb_bend/thumb_yaw
-    as a pre-set thumb pose (Inspire motor 4 / 5 normalized 0..1)."""
+    """hand: 'inspire' (6+6 DOF, Inspire DDS) or 'dex3' (7+7 DOF, unitree_hg DDS).
+    vr_input='hand' uses dex_retargeting from VR keypoints; vr_input='controller'
+    uses Quest3 controller trigger as a grasp/release toggle, with thumb_bend/thumb_yaw
+    (0..1) selecting a pre-set thumb pose."""
     #Set SharedMemory
     television_shm = SharedMemoryManager(TELEVISION, shared_lock["television_lock"], shm_name["television_shm"])
     freq_shm = SharedMemoryManager(WORKER_FREQ, shared_lock["freq_lock"], shm_name["freq_shm"])
@@ -81,21 +83,37 @@ def worker_hand_ctrl(shared_event, shm_name, shared_lock,
                 # set_g1이 올라오면 IK 초기화 1회 시도
                 if shared_event['set_hand'].is_set() and not hand_initialized:
                     try:
-                        # 실제 Hand 컨트롤러 인스턴스 생성
-                        left_hand_array = Array('d', 5 * 3, lock=True)  # 각 손가락 tip의 (x, y, z) 위치 값
-                        right_hand_array = Array('d', 5 * 3, lock=True)  # 각 손가락 tip의 (x, y, z) 위치 값
-
+                        left_hand_array  = Array('d', 5 * 3, lock=True)
+                        right_hand_array = Array('d', 5 * 3, lock=True)
                         dual_hand_data_lock = Lock()
-                        dual_hand_state_array = Array('d', 12, lock = False)   # [output] current left, right hand state(12) data.
-                        dual_hand_action_array = Array('d', 12, lock = False)  # [output] current left, right hand action(12) data.
-                        hand_ctrl = Inspire_Controller(shm_name, shared_lock, left_hand_array, right_hand_array,
-                                                    dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array,
-                                                    fps=100.0, Unit_Test=False,
-                                                    vr_input=vr_input,
-                                                    thumb_bend=thumb_bend, thumb_yaw=thumb_yaw)
-    
+
+                        if hand == "inspire":
+                            from hand_control.robot_hand_inspire import Inspire_Controller
+                            # Inspire: 양손 6+6 = 12 motors, normalized 0..1 q
+                            dual_hand_state_array  = Array('d', 12, lock=False)
+                            dual_hand_action_array = Array('d', 12, lock=False)
+                            hand_ctrl = Inspire_Controller(
+                                shm_name, shared_lock, left_hand_array, right_hand_array,
+                                dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array,
+                                fps=100.0, Unit_Test=False,
+                                vr_input=vr_input, thumb_bend=thumb_bend, thumb_yaw=thumb_yaw,
+                            )
+                        elif hand == "dex3":
+                            from hand_control.robot_hand_dex3 import Dex3_Controller
+                            # DEX3: 양손 7+7 = 14 motors, raw radian q
+                            dual_hand_state_array  = Array('d', 14, lock=False)
+                            dual_hand_action_array = Array('d', 14, lock=False)
+                            hand_ctrl = Dex3_Controller(
+                                shm_name, shared_lock, left_hand_array, right_hand_array,
+                                dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array,
+                                fps=100.0, Unit_Test=False,
+                                vr_input=vr_input, thumb_bend=thumb_bend, thumb_yaw=thumb_yaw,
+                            )
+                        else:
+                            raise ValueError(f"Unsupported hand hardware: {hand}")
+
                         hand_initialized = True
-                        logger_mp.info("[Hand_Ctrl] Hand controller initialized.")
+                        logger_mp.info(f"[Hand_Ctrl] Hand controller initialized (hand={hand}, vr_input={vr_input}).")
                     except Exception as e:
                         logger_mp.exception("[Hand_Ctrl] Hand init failed: %s", e)
                         shared_event['emergency'].set()
@@ -112,21 +130,23 @@ def worker_hand_ctrl(shared_event, shm_name, shared_lock,
 
                 freq_shm.write_data(hand_freq=rate.tick_hz())
 
-                if shared_event['set_start'].is_set() and not replay and not deploy: 
+                if shared_event['set_start'].is_set() and not replay and not deploy:
                     data = television_shm.read_data()
 
-                    left_hand       = data["left_hand"]        
-                    right_hand      = data["right_hand"]       
+                    left_hand       = data["left_hand"]
+                    right_hand      = data["right_hand"]
 
-                    left_hand_array[:] = left_hand.flatten()
+                    left_hand_array[:]  = left_hand.flatten()
                     right_hand_array[:] = right_hand.flatten()
 
-                    robot_obs_shm.write_data(
-                        obs_hand=dual_hand_state_array,
-                    )            
-                    robot_action_shm.write_data(
-                        action_hand=dual_hand_action_array,
-                    )
+                    # obs_hand / action_hand SHM 은 14D. 양손 DOF 가 작은 경우 (Inspire 12D) pad.
+                    obs14    = np.zeros(14, dtype=np.float64)
+                    act14    = np.zeros(14, dtype=np.float64)
+                    n        = len(dual_hand_state_array)
+                    obs14[:n] = dual_hand_state_array[:]
+                    act14[:n] = dual_hand_action_array[:]
+                    robot_obs_shm.write_data(obs_hand=obs14)
+                    robot_action_shm.write_data(action_hand=act14)
 
 
                 if replay and not replay_demo_init :
@@ -192,14 +212,16 @@ def worker_hand_ctrl(shared_event, shm_name, shared_lock,
                         # 아직 시간이 안 됐으면 같은 프레임 유지
 
                     idx = replay_frame_idx
-                    hand_vec = replay_hand_data[idx]  # length 12
+                    hand_vec = replay_hand_data[idx]  # length 12 (inspire) or 14 (dex3)
 
+                    # hand 종류별 분할.
+                    if hand == "inspire":
+                        left_q_target  = hand_vec[:6]
+                        right_q_target = hand_vec[6:12]
+                    else:  # dex3
+                        left_q_target  = hand_vec[:7]
+                        right_q_target = hand_vec[7:14]
 
-                    # 2) 왼손/오른손으로 분할 (각 6개 joint, inspire 양손)
-                    left_q_target  = hand_vec[:6]
-                    right_q_target = hand_vec[6:12]
-
-                    # 3) 컨트롤러에 전달
                     hand_ctrl.ctrl_dual_hand(left_q_target=left_q_target,
                                             right_q_target=right_q_target)
 
@@ -210,21 +232,26 @@ def worker_hand_ctrl(shared_event, shm_name, shared_lock,
 
 
                 if deploy:
-                    # deploy 모드: evaluate.py(외부 inference) 가 robot_action_shm.action_hand 에
-                    # 양손 12D 를 직접 쓰면 그대로 inspire 컨트롤러에 publish.
+                    # deploy 모드: evaluate.py(외부 inference) 가 robot_action_shm.action_hand
+                    # 에 양손 q 를 직접 publish. hand 종류에 따라 슬라이싱이 다르다.
                     robot_dict = robot_action_shm.read_data()
                     hand_action = robot_dict["action_hand"]
-                    hand_action = np.clip(hand_action, a_min=None, a_max=1.0)
-
-                    left_q_target  = hand_action[:6]
-                    right_q_target = hand_action[6:12]
+                    if hand == "inspire":
+                        # Inspire 는 0..1 normalized q
+                        hand_action = np.clip(hand_action, a_min=None, a_max=1.0)
+                        left_q_target  = hand_action[:6]
+                        right_q_target = hand_action[6:12]
+                    else:  # dex3
+                        left_q_target  = hand_action[:7]
+                        right_q_target = hand_action[7:14]
                     hand_ctrl.ctrl_dual_hand(left_q_target=left_q_target,
                                             right_q_target=right_q_target)
 
-
-                robot_obs_shm.write_data(
-                    obs_hand=dual_hand_state_array,
-                )            #왜 넣었는지 기억안남
+                # 매 사이클 obs_hand SHM 갱신 — record/UI 가 최신 값을 읽도록.
+                obs14 = np.zeros(14, dtype=np.float64)
+                n     = len(dual_hand_state_array)
+                obs14[:n] = dual_hand_state_array[:]
+                robot_obs_shm.write_data(obs_hand=obs14)
             
                 rate.sleep()
 

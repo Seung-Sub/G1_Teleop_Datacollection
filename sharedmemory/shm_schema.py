@@ -6,7 +6,7 @@ import numpy as np
 # ---- 직교 옵션 매핑 (main.py CLI flag <-> int code) ----
 # 텔레옵은 항상 동일한 골격(arm IK + Inspire 양손 + ZED|RealSense 카메라).
 # 정책 분기는 이 세 축으로만 결정한다.
-HAND_MAPPING       = {'inspire':    0}
+HAND_MAPPING       = {'inspire':    0, 'dex3':    1}
 CAMERA_MAPPING     = {'zed':        0, 'realsense': 1}
 VR_INPUT_MAPPING   = {'hand':       0, 'controller': 1}
 
@@ -20,7 +20,9 @@ ROBOT_OBS = [
     ("obs_waist",        (3,),    np.float64),
     ("obs_head",        (2,),    np.float64),
     ("obs_arm",        (14,),    np.float64),
-    ("obs_hand",        (12,),    np.float64),
+    # 양손 hand state — max DOF = DEX3 14 (7+7). Inspire 의 경우 [:12] 만 의미가 있고
+    # 나머지 [12:14] 는 0. 학습/배포 측 modality.json 에서 hand 종류에 맞게 슬라이싱.
+    ("obs_hand",        (14,),    np.float64),
 ]
 
 ROBOT_ACTION = [
@@ -31,7 +33,8 @@ ROBOT_ACTION = [
     ("action_head",        (2,),    np.float64),
     ("action_arm",        (14,),    np.float64),
     ("action_arm_tauff",        (14,),    np.float64),
-    ("action_hand",        (12,),    np.float64),
+    # 같은 이유로 14 로 통일. Inspire 는 [:12], DEX3 는 [:14] 모두 사용.
+    ("action_hand",        (14,),    np.float64),
 ]
 
 GR00T_TASK_LAYOUT = [
