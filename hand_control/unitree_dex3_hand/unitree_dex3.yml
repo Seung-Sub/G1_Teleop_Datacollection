@@ -1,9 +1,18 @@
+# Unitree DEX3 양손 retargeting config (DexPilot)
+#
+# NOTE: xr_teleoperate 원본 yml 은 dex_retargeting 의 신버전을 가정해
+# `target_link_human_indices_dexpilot` / `target_link_human_indices_vector`
+# / `target_origin_link_names` / `target_task_link_names` 같은 vector-type
+# 전용 키들을 함께 노출한다. 우리 hand_control/dex_retargeting fork 는
+# `target_link_human_indices` 단일 키만 받는 구버전이므로 이 파일은 우리
+# fork 가 받을 수 있는 형태로 축약했다. xr_teleoperate 의 dexpilot 값을
+# `target_link_human_indices` 로 그대로 가져왔다. (left/right 동일)
+
 left:
-  type: DexPilot # or vector
+  type: DexPilot
   urdf_path: unitree_dex3_hand/unitree_dex3_left.urdf
 
-  # Target refers to the retargeting target, which is the robot hand
-  target_joint_names: 
+  target_joint_names:
     [
       "left_hand_thumb_0_joint",
       "left_hand_thumb_1_joint",
@@ -14,29 +23,18 @@ left:
       "left_hand_index_1_joint",
     ]
 
-  # for DexPilot type
   wrist_link_name: "base_link"
-  finger_tip_link_names: [ "thumb_tip",  "index_tip", "middle_tip"]
-  # If you do not know exactly how it is used, please leave it to None for default.
-  target_link_human_indices_dexpilot: [[ 9, 14, 14, 0, 0, 0], [ 4, 4, 9, 4, 9, 14]]
+  finger_tip_link_names: ["thumb_tip", "index_tip", "middle_tip"]
+  target_link_human_indices: [[9, 14, 14, 0, 0, 0], [4, 4, 9, 4, 9, 14]]
 
-  # for vector type
-  target_origin_link_names: ["base_link_thumb","base_link_index","base_link_middle"]
-  target_task_link_names: ["thumb_tip","index_tip","middle_tip"]
-  target_link_human_indices_vector: [[0, 0, 0], [4, 9, 14]]
-
-  # Scaling factor for vector retargeting only
-  # For example, Allegro is 1.6 times larger than normal human hand, then this scaling factor should be 1.6
   scaling_factor: 1.0
-  # A smaller alpha means stronger filtering, i.e. more smooth but also larger latency
   low_pass_alpha: 0.2
 
 right:
-  type: DexPilot # or vector
+  type: DexPilot
   urdf_path: unitree_dex3_hand/unitree_dex3_right.urdf
 
-  # Target refers to the retargeting target, which is the robot hand
-  target_joint_names: 
+  target_joint_names:
     [
       "right_hand_thumb_0_joint",
       "right_hand_thumb_1_joint",
@@ -46,18 +44,10 @@ right:
       "right_hand_middle_0_joint",
       "right_hand_middle_1_joint",
     ]
-  # for DexPilot type
-  wrist_link_name: "base_link"
-  finger_tip_link_names: [ "thumb_tip",  "index_tip", "middle_tip"]
-  target_link_human_indices_dexpilot: [[ 9, 14, 14, 0, 0, 0], [ 4, 4, 9, 4, 9, 14]]
-  
-  # for vector type
-  target_origin_link_names: ["base_link_thumb","base_link_index","base_link_middle"]
-  target_task_link_names: ["thumb_tip", "index_tip", "middle_tip"]
-  target_link_human_indices_vector: [[0, 0, 0], [4, 9, 14]]
 
-  # Scaling factor for vector retargeting only
-  # For example, Allegro is 1.6 times larger than normal human hand, then this scaling factor should be 1.6
+  wrist_link_name: "base_link"
+  finger_tip_link_names: ["thumb_tip", "index_tip", "middle_tip"]
+  target_link_human_indices: [[9, 14, 14, 0, 0, 0], [4, 4, 9, 4, 9, 14]]
+
   scaling_factor: 1.0
-  # A smaller alpha means stronger filtering, i.e. more smooth but also larger latency
   low_pass_alpha: 0.2
