@@ -285,27 +285,26 @@ class Dex3_Controller:
                     right_q_target = _grip_q_right(grasp_r, self.thumb_yaw, self.thumb_bend)
 
                 # ===========================================================
-                # vr_input == "hand": dex_retargeting (xr_teleoperate 패턴)
+                # vr_input == "hand": DexPilot retargeting — 현재 NOT WIRED.
+                #
+                # xr_teleoperate `robot_hand_unitree.Dex3_1_Controller`(L186-191)는
+                # *25개* hand landmark 전체에서 `left_indices[1,:] - left_indices[0,:]`
+                # 차분 벡터(6쌍)를 만들어 retarget() 에 넘긴다. 우리
+                # open_television/television.py 는 현재 5개 손가락 tip 만 SHM 으로
+                # 노출하므로 DEX3 DexPilot solver 가 요구하는 입력 shape 과 맞지
+                # 않는다. controller-mode 가 사용자 요구사항의 핵심이므로 hand-mode
+                # 는 안전한 release 자세를 publish 한다.
+                #
+                # 향후 확성 단계:
+                #   1) television.py 에 raw 25*3 landmark Array 추가
+                #   2) hand_retargeting 에 left_indices/right_indices =
+                #      retargeting.optimizer.target_link_human_indices 노출
+                #   3) 여기서 ref = landmarks[indices[1]] - landmarks[indices[0]]
+                #      차분 벡터를 만든 후 retarget()
                 # ===========================================================
                 else:
-                    left_kp  = np.array(left_hand_array[:]).reshape(5, 3).copy()
-                    right_kp = np.array(right_hand_array[:]).reshape(5, 3).copy()
-
-                    if not np.all(right_kp == 0.0) and not np.all(left_kp[4] == np.array([-0.8, 0.3, 0.15])):
-                        # Inspire 와 달리 raw 5*3 tip 만 넘기지 않고, xr_teleoperate 처럼
-                        # left_indices/right_indices 차이가 필요 — 우리 패턴(5,3 → retarget) 으로 유지.
-                        try:
-                            left_raw  = self.hand_retargeting.left_retargeting.retarget(left_kp)
-                            right_raw = self.hand_retargeting.right_retargeting.retarget(right_kp)
-                            left_q_target  = left_raw[self.hand_retargeting.left_dex_retargeting_to_hardware]
-                            right_q_target = right_raw[self.hand_retargeting.right_dex_retargeting_to_hardware]
-                        except Exception as e:
-                            logger_mp.warning(f"[Dex3] retarget failed (fallback to zero): {e}")
-                            left_q_target  = np.zeros(Dex3_Num_Motors)
-                            right_q_target = np.zeros(Dex3_Num_Motors)
-                    else:
-                        left_q_target  = np.zeros(Dex3_Num_Motors)
-                        right_q_target = np.zeros(Dex3_Num_Motors)
+                    left_q_target  = _grip_q_left(False, self.thumb_yaw, self.thumb_bend)
+                    right_q_target = _grip_q_right(False, self.thumb_yaw, self.thumb_bend)
 
                 action_data = np.concatenate((left_q_target, right_q_target))  # 14, radian
                 if dual_hand_state_array is not None and dual_hand_action_array is not None and dual_hand_data_lock is not None:

@@ -287,6 +287,10 @@ def main():
     managers  = create_shm_managers(locks)
 
     logger_mp.info(f"[main] hand={args.hand} camera={args.camera} vr_input={args.vr_input}")
+    if args.hand == 'dex3' and args.vr_input == 'hand':
+        logger_mp.warning(
+            "[main] DEX3 + vr-input=hand: hand-tracking 경로는 25 landmark 입력이 "
+            "필요해 현재 안전 default(release pose)만 publish합니다. controller 모드 사용을 권장합니다.")
 
     specs     = get_worker_specs(args, events, locks, shm_names)
     processes = launch_processes(specs)
