@@ -225,10 +225,9 @@ def worker_hand_ctrl(shared_event, shm_name, shared_lock,
                     hand_ctrl.ctrl_dual_hand(left_q_target=left_q_target,
                                             right_q_target=right_q_target)
 
-                    # 5) 다음 프레임으로
-                    replay_frame_idx += 1
-                    if replay_frame_idx >= replay_length - 1:
-                        pass
+                    # 프레임 전진은 위의 타이머/타임스탬프 분기에서만 수행.
+                    # (과거 코드에 있던 unconditional `replay_frame_idx += 1` 은 body(worker_g1_ik)
+                    #  20Hz vs hand 50Hz 비동기 버그의 원인이라 제거.)
 
 
                 if deploy:

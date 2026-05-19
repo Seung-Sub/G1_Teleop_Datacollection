@@ -780,10 +780,12 @@ class TeleopUI(QtWidgets.QMainWindow):
 
     def on_deploy(self):
         """
-        SET 버튼을 눌렀을 때:
-          1) task_name, num_episodes, episode_len을 SHM에 기록
-          2) 버튼 플래그 초기화 (start/reset/replay 모두 False)
-          3) record_info 창에 “설정 완료” 메시지 출력
+        Deploy 버튼을 눌렀을 때:
+          1) language instruction (task_name) 을 GR00T_TASK_LAYOUT 에 write
+          2) record_mode.deploy = True (다른 mode flag 는 False)
+          3) shared_event['set_start'] 도 함께 set — worker_g1_ctrl / worker_g1_ik /
+             worker_hand_ctrl 가 RUN state 로 진입해야 evaluate.py 가 publish 한
+             action 이 실제 ROBOT 으로 흘러간다.
         """
         # 1) 입력값 읽어오기
         task_text = self.gr00t_task_name_le.text().strip()
@@ -798,8 +800,14 @@ class TeleopUI(QtWidgets.QMainWindow):
                 reset        = np.bool_(False),
                 replay       = np.bool_(False),
                 done         = np.bool_(False),
-                deploy       = np.bool_(True) 
+                deploy       = np.bool_(True)
             )
+            # FSM RUN 진입 보장 (deploy 단독으로는 set_start 가 set 되지 않으면
+            # worker_g1_ctrl.do_slow 가 action 을 적용하지 않음).
+            if not self.shared_event['set_start'].is_set():
+                self.shared_event['set_start'].set()
+            self.record_info.append(f"[INFO] Deploy 시작: '{task_text}'")
+            logger_mp.info(f"Deploy 시작: task='{task_text}'")
         except Exception as e:
             self.record_info.append(f"[ERROR] SHM Write 실패: {e}")
             logger_mp.error(f"SHM Write 실패 on_set_task: {e}")

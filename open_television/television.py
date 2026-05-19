@@ -286,6 +286,10 @@ class TeleVision:
             await asyncio.sleep(0.016 * 2)
 
     async def main_image_monocular(self, session, fps=60):
+        # NOTE: 현재 worker_vr 는 항상 binocular=True 로 TeleVisionWrapper 를 생성하므로
+        # 이 분기는 실행되지 않는다. 향후 single-view 모드를 enable 할 때를 위해
+        # CAMERA schema 에 존재하는 'realsense' 키로 정렬해 둠 ('camera_color' 는
+        # schema 에 없는 키였음).
         if self.vr_input == "controller" and _HAS_MOTION_CONTROLLERS:
             session.upsert @ MotionControllers(fps=fps, stream=True, key="ctrls",
                                                left=True, right=True)
@@ -293,16 +297,16 @@ class TeleVision:
             session.upsert @ Hands(fps=fps, stream=True, key="hands",
                                    showLeft=False, showRight=False)
         while True:
-            # display_image = cv2.cvtColor(self.img_array, cv2.COLOR_BGR2RGB)
-
-
             try:
                 data_dict = self.camera_image.read_data()
             except Exception as e:
-                # 읽기 실패 시 간단히 리턴 (로그를 남겨도 좋음)
                 return
 
-            raw = data_dict.get("camera_color", None)
+            raw = data_dict.get("realsense", None)
+            if raw is None:
+                # frame 이 아직 안 들어왔으면 다음 cycle 까지 대기
+                await asyncio.sleep(0.016)
+                continue
             display_image = cv2.cvtColor(raw, cv2.COLOR_BGR2RGB)
 
             session.upsert(

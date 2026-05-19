@@ -225,10 +225,12 @@ class Dynamixel_Controller:
         while self.running:
             start_time = time.time()
 
+            # Head DXL target은 ctrl_dynamixel() 로 외부에서 갱신된 self.q_target 을 그대로 따른다.
+            # 초기값은 __init__ 의 self.q_target = np.array([2048, 1934]) (ready-pose tick).
+            # controller-mode 에서는 worker_g1_ik 가 action_head = HEAD_READY_RAD 를 publish 하여
+            # rad_to_dxl_tick 결과가 [2048, 1934] 로 수렴하도록 한다.
             with self.ctrl_lock:
                 q_target = self.q_target
-                q_target = np.array([2048, 1934])
-                #q_target = np.array([2048, 2048])
             # cliped_q_target = self.clip_q_target(q_target, velocity_limit = self.velocity_limit)
 
 

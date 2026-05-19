@@ -27,6 +27,11 @@ BUTTON_THRESH     = 0.5
 WAIST_LIMITS      = np.array([1.05, 0.6, 0.6])   # |yaw|, |roll|, |pitch| (rad) safety clamp
 WAIST_GAIN        = np.array([1.0, 1.0, 1.0])    # HMD delta -> waist target 매핑 게인
 
+# Head ready-pose (controller 모드 head 고정값). DXL tick [2048, 1934] 에 해당.
+# (1934 - 2048) / (4096 / 2π) = -0.17486 rad. yaw=0(center), pitch=-0.175(약 -10° 아래로 기울임).
+# 이 값은 카메라 mount install 자세에 맞춰진 hardware-specific ready 자세.
+HEAD_READY_RAD    = np.array([0.0, -0.17486])
+
 
 def _events_snapshot(shared_event, g1_initialized: bool) -> EventsSnapshot:
     return EventsSnapshot(
@@ -272,7 +277,7 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand"):
                         robot_action_shm.write_data(
                             action_waist     =target_waist_q,
                             action_waist_tauff=np.zeros(3),
-                            action_head      =np.zeros(2),                 # controller 모드: 머리 정면 고정
+                            action_head      =HEAD_READY_RAD,               # controller 모드: 머리는 ready-pose([2048,1934])로 고정
                             action_arm       =sol_q[5:],
                             action_arm_tauff =sol_tauff[5:],
                         )
@@ -349,7 +354,7 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand"):
                     replay_actions   = np.stack(df["action"].to_numpy()).astype(np.float64)
                     replay_length    = replay_actions.shape[0]
 
-                    replay_g1_data = replay_actions[:, :19]   # (N,12)
+                    replay_g1_data = replay_actions[:, :19]   # (N,19) = waist3 + head2 + arm14
 
                     replay_demo_init = True
                     replay_frame_idx = 0
@@ -421,16 +426,10 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand"):
 
                             logger_mp.info("[REPLAY DONE] Finished all frames")
 
-                if deploy : 
-                    if home:
-                        # record_mode_data = record_mode_shm.read_data()
-                        # record_mode_data["deploy"] = False
-                        # record_mode_data["home"] = False
-                        # record_mode_data["start"] = False
-                        # record_mode_shm.write_data(**record_mode_data)
-                        # # shared_event['set_start'].clear()
-                        continue
-
+                # deploy 모드: 이 워커는 IK 를 수행하지 않고, evaluate.py(외부 conda env)
+                # 가 ROBOT_ACTION SHM 에 action 을 직접 publish 한다. 여기서는 단순히
+                # rate.sleep 만 수행하고 home 등의 SHM 토글은 그쪽(평가 워커/ UI) 책임.
+                # (과거 주석처리된 home flag reset 코드는 evaluate.py 도입 후 의미 없어 제거.)
 
                 rate.sleep()
 
