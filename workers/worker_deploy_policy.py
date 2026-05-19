@@ -210,6 +210,8 @@ class Gr00t_Inference:
         denoising_steps: int = 4,
         binocular: bool = True,
         masking: bool = False,
+        lag_compensate: bool = True,
+        lag_log_every: int = 50,
     ):
         assert mode in ("gr00t", "gr00t_zed"), f"unsupported mode: {mode}"
         assert action_method in ("base", "maf", "tem"), f"unknown method: {action_method}"
@@ -228,6 +230,15 @@ class Gr00t_Inference:
         self.window_size     = int(window_size)
         self.slow_hz         = float(slow_hz)
         self.fast_hz         = float(fast_hz)
+        # Phase E: inference 지연 보상.
+        # gr00t_inference 가 chunk 생성 후 (t_now - obs_body_ts) 만큼 stale 한 앞부분을
+        # trim 한다. 이는 모델 forward + SHM read latency 를 합산한 실측치이며,
+        # 매 chunk 마다 측정 → trim 샘플 수 = round(lag_ns * fast_hz / 1e9).
+        self.lag_compensate  = bool(lag_compensate)
+        self.lag_log_every   = max(1, int(lag_log_every))
+        self._lag_chunk_count   = 0
+        self._lag_ns_acc        = 0
+        self._lag_ns_max        = 0
 
         # SHM handles
         self._init_shm(shm_name, shared_lock)
@@ -284,10 +295,20 @@ class Gr00t_Inference:
         logger_mp.info(f"[Deploy] Policy loaded. Language instruction: {task_name!r}")
 
     # ----- observation -------------------------------------------------------
-    def get_real_obs(self) -> Optional[dict]:
-        """Pull a single observation dict from SHM. Returns None when frames are unavailable."""
+    def get_real_obs(self):
+        """Pull obs dict + sample-time ts from SHM. Returns (obs, obs_ts_ns) or None.
+
+        obs_ts_ns = max(obs_body_ts, obs_hand_ts) — 보수적으로 (가장 최근에 갱신된) ts.
+        둘 다 0 이면 (writer 가 아직 publish 안 했으면) None 반환.
+        """
         cam = self.camera_shm.read_data()
         ro  = self.robot_obs_shm.read_data()
+
+        ts_body = int(ro["obs_body_ts"])
+        ts_hand = int(ro["obs_hand_ts"])
+        if ts_body <= 0 and ts_hand <= 0:
+            return None
+        obs_ts_ns = max(ts_body, ts_hand)
 
         obs_waist = ro["obs_waist"]; obs_head = ro["obs_head"]
         obs_arm   = ro["obs_arm"];   obs_hand = ro["obs_hand"]
@@ -322,14 +343,19 @@ class Gr00t_Inference:
         with self._obs_lock:
             self.qpos      = qpos
             self.hand_qpos = hand_qpos
-        return obs
+        return (obs, obs_ts_ns)
 
     # ----- inference + chunk handling ---------------------------------------
-    def gr00t_inference(self, obs: dict):
-        """Run policy.get_action -> upsample -> cross-fade -> latch primary_*"""
+    def gr00t_inference(self, obs: dict, obs_ts_ns: int):
+        """policy.get_action -> upsample -> lag trim -> cross-fade -> latch primary_*
+
+        obs_ts_ns: t_obs (ROBOT_OBS *_ts at sampling time). Inference 가 진행되는
+        동안 흐른 wall-clock 만큼 chunk 앞부분이 stale 하므로 trim.
+        """
         if self.policy is None:
             return
         action = self.policy.get_action(obs)
+        t_after_ns = time.perf_counter_ns()
 
         # Build (T, D) action and (T, D_hand) hand sequences from the chunk.
         T = action["action.waist"].shape[1]
@@ -345,6 +371,31 @@ class Gr00t_Inference:
         # Upsample 20Hz -> 50Hz with quintic spline
         full_up = upsample_actions(full, slow_hz=self.slow_hz, fast_hz=self.fast_hz, k=5)
         hand_up = upsample_actions(hand, slow_hz=self.slow_hz, fast_hz=self.fast_hz, k=5)
+
+        # ---- Phase E: inference lag compensation -------------------------
+        # full_up[i] 는 t_obs + i/fast_hz 시점의 action. publish 가 t_after 부터
+        # 시작되므로 (t_after - t_obs) 만큼은 이미 지나간 시각 — 그만큼 trim.
+        lag_ns       = max(0, t_after_ns - obs_ts_ns)
+        trim_samples = int(round(lag_ns * self.fast_hz / 1e9)) if self.lag_compensate else 0
+        if trim_samples > 0 and trim_samples < len(full_up) - 1:
+            full_up = full_up[trim_samples:]
+            hand_up = hand_up[trim_samples:]
+        elif trim_samples >= len(full_up) - 1:
+            # 너무 길게 stale 한 경우 — 최소 1 frame 만 남겨놓고 trim
+            full_up = full_up[-1:]
+            hand_up = hand_up[-1:]
+        # 통계 누적
+        self._lag_chunk_count += 1
+        self._lag_ns_acc     += lag_ns
+        if lag_ns > self._lag_ns_max:
+            self._lag_ns_max  = lag_ns
+        if self._lag_chunk_count % self.lag_log_every == 0:
+            avg_ms = (self._lag_ns_acc / self._lag_chunk_count) / 1e6
+            max_ms = self._lag_ns_max / 1e6
+            logger_mp.info(
+                f"[Deploy] lag stats: avg={avg_ms:.1f}ms max={max_ms:.1f}ms "
+                f"(last trim={trim_samples} samples, compensate={self.lag_compensate})"
+            )
 
         # Cross-fade with the tail of the previous chunk if it is still in flight.
         if self._prev_actions is not None and self.primary_index < len(self._prev_actions):
@@ -440,10 +491,11 @@ class Gr00t_Inference:
 
     # ----- per-loop work units ----------------------------------------------
     def do_slow(self):
-        obs = self.get_real_obs()
-        if obs is None:
+        res = self.get_real_obs()
+        if res is None:
             return
-        self.gr00t_inference(obs)
+        obs, obs_ts_ns = res
+        self.gr00t_inference(obs, obs_ts_ns)
 
     def do_fast(self):
         a, h = self.get_action()

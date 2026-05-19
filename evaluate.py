@@ -82,6 +82,13 @@ def _parse_args():
                    help="Disable right-view consumption even in --mode gr00t_zed")
     p.add_argument("--masking", action="store_true",
                    help="Apply workspace_mask_shm to input frames before inference")
+    # Phase E — chunk lag compensation
+    p.add_argument("--lag-compensate", dest="lag_compensate", action="store_true", default=True,
+                   help="Trim chunk start by measured (t_publish - t_obs) lag (default: on)")
+    p.add_argument("--no-lag-compensate", dest="lag_compensate", action="store_false",
+                   help="Disable inference-lag chunk trim (debug)")
+    p.add_argument("--lag-log-every", type=int, default=50,
+                   help="Log avg/max lag every N chunks")
     return p.parse_args()
 
 
@@ -109,11 +116,14 @@ def main():
         denoising_steps=args.denoising_steps,
         binocular     =args.binocular,
         masking       =args.masking,
+        lag_compensate=args.lag_compensate,
+        lag_log_every =args.lag_log_every,
     )
 
     print(f"[evaluate] Running. UI must set Deploy=True to start policy loading.")
     print(f"[evaluate] mode={args.mode} action_method={args.action_method} "
-          f"slow={args.slow_hz}Hz fast={args.fast_hz}Hz")
+          f"slow={args.slow_hz}Hz fast={args.fast_hz}Hz "
+          f"lag_compensate={args.lag_compensate}")
     try:
         while not shared_event["shutdown"].is_set():
             time.sleep(0.5)
