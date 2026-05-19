@@ -7,12 +7,17 @@ import numpy as np
 # 텔레옵은 항상 동일한 골격(arm IK + Inspire 양손 + ZED|RealSense 카메라).
 # 정책 분기는 이 세 축으로만 결정한다.
 HAND_MAPPING       = {'inspire':    0, 'dex3':    1}
-CAMERA_MAPPING     = {'zed':        0, 'realsense': 1}
+CAMERA_MAPPING     = {'zed':        0, 'realsense': 1, 'auto': 2, 'none': 3}
 VR_INPUT_MAPPING   = {'hand':       0, 'controller': 1}
+# Phase F: HMD→waist 매핑 on/off, head DXL on/off
+WAIST_MAPPING      = {'hmd':        0, 'fixed':    1}   # 0=HMD R_delta 적용, 1=고정 (init q 유지)
+HEAD_MAPPING       = {'dxl':        0, 'off':      1}   # 0=Dynamixel 사용, 1=DXL skip
 
 HAND_MAPPING_INV     = {v: k for k, v in HAND_MAPPING.items()}
 CAMERA_MAPPING_INV   = {v: k for k, v in CAMERA_MAPPING.items()}
 VR_INPUT_MAPPING_INV = {v: k for k, v in VR_INPUT_MAPPING.items()}
+WAIST_MAPPING_INV    = {v: k for k, v in WAIST_MAPPING.items()}
+HEAD_MAPPING_INV     = {v: k for k, v in HEAD_MAPPING.items()}
 
 
 # NOTE: 모든 streaming SHM 에 ts (monotonic nanosecond) 필드 추가 (Phase D).
@@ -160,9 +165,11 @@ MASK_CONTROL_LAYOUT = [
 # 텔레옵 구성(직교 옵션) 공유 메모리.
 # main.py 가 시작 시 1회 채우고, record/log 등에서 참고만 한다 (분기 X).
 TELEOP_CONFIG = [
-    ("hand_type",  (), np.int32),  # HAND_MAPPING       (e.g. 0=inspire)
-    ("camera_type",(), np.int32),  # CAMERA_MAPPING     (0=zed, 1=realsense)
+    ("hand_type",  (), np.int32),  # HAND_MAPPING       (0=inspire, 1=dex3)
+    ("camera_type",(), np.int32),  # CAMERA_MAPPING     (0=zed, 1=realsense, 2=auto, 3=none)
     ("vr_input",   (), np.int32),  # VR_INPUT_MAPPING   (0=hand, 1=controller)
+    ("waist_mode", (), np.int32),  # WAIST_MAPPING      (0=hmd, 1=fixed)
+    ("head_mode",  (), np.int32),  # HEAD_MAPPING       (0=dxl, 1=off)
 ]
 
 LEFT_TOUCH_SENSOR_LAYOUT = [

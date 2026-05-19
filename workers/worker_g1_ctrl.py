@@ -30,12 +30,13 @@ class G1CtrlWorker(DualRateWorker):
     느린 루프(ACT_HZ): RUN 상태에서만 액션 읽고 실제 제어 수행
     상태 전이/초기화도 느린 루프에서 처리
     """
-    def __init__(self, shared_event, shm_name, shared_lock, mode):
+    def __init__(self, shared_event, shm_name, shared_lock, mode, head_mode='dxl'):
         super().__init__(slow_hz=ACT_HZ, fast_hz=OBS_HZ)
 
         # 외부 이벤트
         self._shared_event = shared_event
         self.mode = mode
+        self.head_mode = head_mode  # 'dxl' | 'off'
 
         # ── SHM ───────────────────────────────────────────
         self.freq_shm         = SharedMemoryManager(WORKER_FREQ,        shared_lock["freq_lock"],         shm_name["freq_shm"])
@@ -94,14 +95,18 @@ class G1CtrlWorker(DualRateWorker):
         # --- WAIT_CONNECT: 초기화 트리거 ---
         if self.state is State.WAIT_CONNECT:
             if self._shared_event['set_g1'].is_set() and not self.g1_initialized:
-                logger_mp.info("[G1_Ctrl] Initializing G1/DXL...")
+                logger_mp.info(f"[G1_Ctrl] Initializing G1{'+DXL' if self.head_mode=='dxl' else ' (head=off)'}...")
                 try:
                     self.g1_ctrl = G1_29_ArmController(self.mode)
-                    self.d_ctrl = Dynamixel_Controller()                    
+                    if self.head_mode == 'dxl':
+                        self.d_ctrl = Dynamixel_Controller()
+                    else:
+                        self.d_ctrl = None
+                        logger_mp.info("[G1_Ctrl] head_mode=off — Dynamixel skipped.")
 
                     self.g1_ctrl.speed_gradual_max()
                     self.g1_initialized = True
-                    logger_mp.info("[G1_Ctrl] G1/DXL initialized.")
+                    logger_mp.info("[G1_Ctrl] G1 initialized.")
                 except Exception as e:
                     logger_mp.exception("[G1_Ctrl] G1 init failed: %s", e)
                     self._shared_event['emergency'].set()
@@ -134,13 +139,10 @@ class G1CtrlWorker(DualRateWorker):
             self.g1_ctrl.ctrl_leg(action_leg)
             self.g1_ctrl.ctrl_waist(action_waist, action_waist_tauff)
 
-            # 머리 제어 (Dynamixel 사용)
-            if hasattr(self, 'd_ctrl') and self.d_ctrl is not None:
+            # 머리 제어 (Dynamixel) — head_mode='off' 면 d_ctrl=None 으로 skip
+            if self.d_ctrl is not None:
                 d_tick = np.array([self.d_ctrl.rad_to_dxl_tick(x) for x in action_head], dtype=int)
-                # 실제 머리 제어 명령
                 self.d_ctrl.ctrl_dynamixel(d_tick)
-            else:
-                logger_mp.warning("[G1_Ctrl] d_ctrl not available for head control")
 
             self.g1_ctrl.ctrl_arm(action_arm, action_arm_tauff)
 
@@ -194,8 +196,8 @@ class G1CtrlWorker(DualRateWorker):
 
 
 # ────────────── 실행 진입점 예시 ──────────────
-def worker_g1_ctrl(shared_event, shm_name, shared_lock,mode):
-    w = G1CtrlWorker(shared_event, shm_name, shared_lock, mode)
+def worker_g1_ctrl(shared_event, shm_name, shared_lock, mode, head_mode='dxl'):
+    w = G1CtrlWorker(shared_event, shm_name, shared_lock, mode, head_mode=head_mode)
     try:
         w.start()
         while not shared_event['shutdown'].is_set():

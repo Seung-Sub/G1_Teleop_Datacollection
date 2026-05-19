@@ -15,14 +15,13 @@ logger_mp = logging_mp.get_logger(__name__)
 from utils.rate import Rate
 
 
-def worker_camera(shared_event, shm_name, shared_lock):
-    """
-    RealSense 카메라를 60Hz로 읽어오는 워커 프로세스.
-    shared_event: {'shutdown', 'emergency', ...} 딕셔너리
-    shm_name: 공유 메모리 이름
-    lock: SharedMemory 접근용 Lock
-    """
+def worker_camera(shared_event, shm_name, shared_lock, serial=None):
+    """RealSense color@30Hz 워커.
 
+    Args:
+        serial: RealSense device serial (str). None 이면 첫 번째 device.
+                D435i / D455 / D405 등 모두 동일 pipeline API.
+    """
 
     # 3) SharedMemoryManager 초기화 (필요하다면 사용)
     camera_shm = SharedMemoryManager(CAMERA, shared_lock["camera_lock"], shm_name["camera_shm"])
@@ -33,8 +32,14 @@ def worker_camera(shared_event, shm_name, shared_lock):
     # 4) RealSense pipeline 설정
     pipeline = rs.pipeline()
     config = rs.config()
+    if serial is not None:
+        try:
+            config.enable_device(str(serial))
+            logger_mp.info(f"[Realsense] enable_device(serial={serial})")
+        except Exception as e:
+            logger_mp.warning(f"[Realsense] enable_device({serial}) 실패: {e} — fallback any device")
 
-    # 60fps 해상도 설정 (예: 640x480 @ 60Hz Depth + Color)
+    # 640x480 @ 30 Hz color (BGR8). depth 는 필요 시 enable.
     config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
     # config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 60)
 

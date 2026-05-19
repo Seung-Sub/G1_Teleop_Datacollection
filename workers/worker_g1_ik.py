@@ -47,8 +47,10 @@ def _events_snapshot(shared_event, g1_initialized: bool) -> EventsSnapshot:
         select_pressed = False
     )
 
-def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand"):
-    """vr_input: 'hand' (current behaviour) or 'controller' (Phase 1-C clutch IK)."""
+def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand", waist_mode="hmd"):
+    """vr_input: 'hand' | 'controller'.
+    waist_mode: 'hmd' (HMD R_delta → waist 매핑) | 'fixed' (init waist q 고정).
+    """
 
     #Set SharedMemory
     television_shm       = SharedMemoryManager(TELEVISION,             shared_lock["television_lock"],       shm_name["television_shm"])
@@ -296,11 +298,17 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand"):
                         prev_grip_r = grip_r
 
                         # ---- waist clutch (HMD delta -> waist target) ----------
-                        # 정책: 둘 중 하나의 grip 이라도 잡혀 있는 동안 anchor 유지.
-                        # 둘 다 떼면 anchor=None (다음 grip engage 시 새 anchor).
-                        # anchor q 는 *last target* 사용 (arm clutch 와 동일한 의미) —
-                        # current obs 를 쓰면 PID lag 만큼의 1-tick 백워드 jump 가 가능.
-                        if grip_l or grip_r:
+                        # waist_mode='fixed': HMD 매핑 비활성, target = init waist q (0 벡터) 고정.
+                        # G1 의 waist 모터는 PID 유지 위해 계속 publish 됨 (안전).
+                        if waist_mode == 'fixed':
+                            target_waist_q = np.zeros(3, dtype=np.float64)
+                            waist_anchor_head = None
+                            waist_anchor_q    = None
+                        elif grip_l or grip_r:
+                            # 정책: 둘 중 하나의 grip 이라도 잡혀 있는 동안 anchor 유지.
+                            # 둘 다 떼면 anchor=None (다음 grip engage 시 새 anchor).
+                            # anchor q 는 *last target* 사용 (arm clutch 와 동일한 의미) —
+                            # current obs 를 쓰면 PID lag 만큼의 1-tick 백워드 jump 가 가능.
                             if waist_anchor_head is None:
                                 waist_anchor_head = head_pose.copy()
                                 waist_anchor_q = (

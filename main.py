@@ -30,7 +30,7 @@ from sharedmemory.shm_schema import (
     LEFT_TOUCH_SENSOR_LAYOUT, RIGHT_TOUCH_SENSOR_LAYOUT,
     WORKER_FREQ, GR00T_TASK_LAYOUT, ROBOT_OBS, ROBOT_ACTION,
     MASK_CONTROL_LAYOUT, DEPTH_MAP, TELEOP_CONFIG, QUEST_CONTROLLER,
-    HAND_MAPPING, CAMERA_MAPPING, VR_INPUT_MAPPING,
+    HAND_MAPPING, CAMERA_MAPPING, VR_INPUT_MAPPING, WAIST_MAPPING, HEAD_MAPPING,
 )
 # NOTE: worker_vr / television / Vuer imports are deferred into
 # get_worker_specs() because the params-proto library (a Vuer
@@ -123,28 +123,74 @@ def parse_args():
     parser = argparse.ArgumentParser(description="G1 teleoperation + data collection")
     parser.add_argument('--hand',     choices=list(HAND_MAPPING.keys()),
                         default='inspire', help='Hand hardware')
-    parser.add_argument('--camera',   choices=list(CAMERA_MAPPING.keys()),
-                        default='zed',     help='Egocentric camera source')
+    parser.add_argument('--camera',   default='auto',
+                        help="Camera source: 'zed' | 'realsense' | 'auto' (RealSense 우선 자동감지) | "
+                             "'none' | <serial-number> (특정 device serial)")
+    parser.add_argument('--camera-role', dest='camera_role', default='ego',
+                        help='Camera role label (ego, wrist_l, wrist_r, ...). 기본 ego; 시리얼 지정 시 추후 yaml 매핑.')
+    parser.add_argument('--zed-mode',  dest='zed_mode', choices=['direct', 'stream'], default='direct',
+                        help="ZED 연결 방식: 'direct' = sl.Camera.open(USB), 'stream' = set_from_stream(외부 송신).")
     parser.add_argument('--vr-input', dest='vr_input',
                         choices=list(VR_INPUT_MAPPING.keys()),
                         default='hand',
                         help='Quest3 input mode (hand tracking vs motion controller)')
+    # Phase F: waist / head 제어 on/off
+    parser.add_argument('--waist', choices=list(WAIST_MAPPING.keys()), default='hmd',
+                        help="Waist 제어 모드: 'hmd' = HMD 변위로 waist 제어, 'fixed' = init q 고정")
+    parser.add_argument('--head',  choices=list(HEAD_MAPPING.keys()),  default='dxl',
+                        help="Head Dynamixel: 'dxl' = 사용, 'off' = 비활성 (Dynamixel 없는 G1 / 데이터 수집 시 head 고정)")
     # Inspire thumb 사전 자세 (vr_input=controller 일 때만 사용; 손가락 4개는 trigger로 토글)
     # 값 범위: 0.0(굽힘/안쪽) ~ 1.0(펼침/바깥쪽). 물체에 따라 잡기 편한 자세를 사전 설정.
     parser.add_argument('--thumb-bend', dest='thumb_bend', type=float, default=0.5,
                         help='Inspire thumb bend angle (controller mode only, 0..1)')
     parser.add_argument('--thumb-yaw',  dest='thumb_yaw',  type=float, default=0.5,
                         help='Inspire thumb yaw   angle (controller mode only, 0..1)')
+    # Phase F: G1/Hand 하드웨어 없이 Quest3 입력 + IK 계산만 검증
+    parser.add_argument('--no-robot', dest='no_robot', action='store_true',
+                        help='G1 / hand 워커 spawn 생략 + set_g1/set_hand 자동 set (Quest3 + IK 검증용)')
     return parser.parse_args()
+
+
+def resolve_camera(args):
+    """Resolve --camera 값(zed/realsense/auto/none/<serial>) 을 (type, serial, name) 으로 반환.
+
+    type ∈ {'zed', 'realsense', 'none'}. serial 은 worker_camera/worker_zed 가 사용.
+    """
+    cam = (args.camera or 'auto').strip()
+    if cam == 'none':
+        return ('none', None, None)
+    if cam == 'auto':
+        from utils.camera_discovery import auto_select
+        ct, sn, nm = auto_select(prefer='realsense')
+        if ct is None:
+            logger_mp.warning("[main] --camera auto: no device detected → fall back to 'none'")
+            return ('none', None, None)
+        return (ct, sn, nm)
+    if cam in ('zed', 'realsense'):
+        # 종류만 명시 — auto-select 로 첫 device 잡기 (없으면 worker 가 실패 처리)
+        from utils.camera_discovery import discover_realsense, discover_zed
+        devs = discover_realsense() if cam == 'realsense' else discover_zed()
+        if devs:
+            d = devs[0]
+            return (cam, d['serial'], d['name'])
+        return (cam, None, None)
+    # serial 가정 — 양쪽 discover 모두 시도
+    from utils.camera_discovery import find_by_serial
+    res = find_by_serial(cam)
+    if res is None:
+        raise ValueError(f"--camera={cam!r} 가 연결된 device 와 매칭 안 됨")
+    return res
 
 
 def write_teleop_config(locks, shm_names, args):
     """Write the chosen options into TELEOP_CONFIG SHM (info-only)."""
     cfg = SharedMemoryManager(TELEOP_CONFIG, locks["record_lock"], shm_names["teleop_config_shm"])
     cfg.write_data(
-        hand_type =np.int32(HAND_MAPPING[args.hand]),
-        camera_type=np.int32(CAMERA_MAPPING[args.camera]),
-        vr_input  =np.int32(VR_INPUT_MAPPING[args.vr_input]),
+        hand_type  =np.int32(HAND_MAPPING[args.hand]),
+        camera_type=np.int32(CAMERA_MAPPING[args.resolved_camera]),
+        vr_input   =np.int32(VR_INPUT_MAPPING[args.vr_input]),
+        waist_mode =np.int32(WAIST_MAPPING[args.waist]),
+        head_mode  =np.int32(HEAD_MAPPING[args.head]),
     )
     cfg.worker_close()
 
@@ -162,57 +208,69 @@ def write_teleop_config(locks, shm_names, args):
 
 
 def get_worker_specs(args, events, locks, shm_names):
-    """Build the worker spec list for the chosen --hand/--camera/--vr-input."""
+    """Build the worker spec list for the chosen options."""
     specs = []
 
     write_teleop_config(locks, shm_names, args)
 
     # ---- Robot core (G1 + IK) ---------------------------------------
-    from workers.worker_g1_ctrl import worker_g1_ctrl
-    from workers.worker_g1_ik   import worker_g1_ik
+    # --no-robot 모드: G1 / hand 워커 spec 자체를 미포함 (DDS subscribe 시도 안 함).
+    # set_g1 / set_hand 는 main() 에서 미리 set 되어 worker_g1_ik 등이 FSM RUN 진입.
+    if not args.no_robot:
+        from workers.worker_g1_ctrl import worker_g1_ctrl
+        specs += [
+            {'target': worker_g1_ctrl,
+             'args':   (events, shm_names, locks, 'teleop', args.head),
+             'name':   'worker_g1_ctrl'},
+        ]
+    from workers.worker_g1_ik import worker_g1_ik
     specs += [
-        {'target': worker_g1_ctrl, 'args': (events, shm_names, locks, 'teleop'),
-         'name': 'worker_g1_ctrl'},
-        {'target': worker_g1_ik,   'args': (events, shm_names, locks, args.vr_input),
-         'name': 'worker_g1_ik'},
+        {'target': worker_g1_ik,
+         'args':   (events, shm_names, locks, args.vr_input, args.waist),
+         'name':   'worker_g1_ik'},
     ]
 
     # ---- Hand --------------------------------------------------------
-    if args.hand == 'inspire':
-        from workers.worker_hand_ctrl import worker_hand_ctrl
-        from workers.worker_hand_dds  import worker_hand_r_dds, worker_hand_l_dds
-        specs += [
-            {'target': worker_hand_ctrl,
-             'args':   (events, shm_names, locks, args.hand, args.vr_input, args.thumb_bend, args.thumb_yaw),
-             'name':   'WORKER_HAND'},
-            # Inspire 전용 터치센서 Modbus DDS
-            {'target': worker_hand_r_dds, 'args': ('192.168.123.210', 'r', 'Right-hand process', shm_names, locks),
-             'name': 'WORKER_HAND_R_DDS'},
-            {'target': worker_hand_l_dds, 'args': ('192.168.123.211', 'l', 'Left-hand process',  shm_names, locks),
-             'name': 'WORKER_HAND_L_DDS'},
-        ]
-    elif args.hand == 'dex3':
-        from workers.worker_hand_ctrl import worker_hand_ctrl
-        specs += [
-            {'target': worker_hand_ctrl,
-             'args':   (events, shm_names, locks, args.hand, args.vr_input, args.thumb_bend, args.thumb_yaw),
-             'name':   'WORKER_HAND'},
-            # DEX3 는 별도 터치센서 DDS 가 없다 — worker_hand_*_dds 미동작
-        ]
-    else:
-        raise ValueError(f"Unsupported hand hardware: {args.hand}")
+    if not args.no_robot:
+        if args.hand == 'inspire':
+            from workers.worker_hand_ctrl import worker_hand_ctrl
+            from workers.worker_hand_dds  import worker_hand_r_dds, worker_hand_l_dds
+            specs += [
+                {'target': worker_hand_ctrl,
+                 'args':   (events, shm_names, locks, args.hand, args.vr_input, args.thumb_bend, args.thumb_yaw),
+                 'name':   'WORKER_HAND'},
+                # Inspire 전용 터치센서 Modbus DDS
+                {'target': worker_hand_r_dds, 'args': ('192.168.123.210', 'r', 'Right-hand process', shm_names, locks),
+                 'name': 'WORKER_HAND_R_DDS'},
+                {'target': worker_hand_l_dds, 'args': ('192.168.123.211', 'l', 'Left-hand process',  shm_names, locks),
+                 'name': 'WORKER_HAND_L_DDS'},
+            ]
+        elif args.hand == 'dex3':
+            from workers.worker_hand_ctrl import worker_hand_ctrl
+            specs += [
+                {'target': worker_hand_ctrl,
+                 'args':   (events, shm_names, locks, args.hand, args.vr_input, args.thumb_bend, args.thumb_yaw),
+                 'name':   'WORKER_HAND'},
+                # DEX3 는 별도 터치센서 DDS 가 없다 — worker_hand_*_dds 미동작
+            ]
+        else:
+            raise ValueError(f"Unsupported hand hardware: {args.hand}")
 
-    # ---- Camera (ZED OR RealSense; never both) -----------------------
-    if args.camera == 'zed':
+    # ---- Camera (zed / realsense / none) -----------------------------
+    if args.resolved_camera == 'zed':
         from workers.worker_zed import worker_zed
-        specs += [{'target': worker_zed, 'args': (events, shm_names, locks),
-                   'name': 'WORKER_ZED'}]
-    elif args.camera == 'realsense':
+        specs += [{'target': worker_zed,
+                   'args':   (events, shm_names, locks, args.camera_serial, args.zed_mode),
+                   'name':   'WORKER_ZED'}]
+    elif args.resolved_camera == 'realsense':
         from workers.worker_camera import worker_camera
-        specs += [{'target': worker_camera, 'args': (events, shm_names, locks),
-                   'name': 'WORKER_Realsense'}]
+        specs += [{'target': worker_camera,
+                   'args':   (events, shm_names, locks, args.camera_serial),
+                   'name':   'WORKER_Realsense'}]
+    elif args.resolved_camera == 'none':
+        logger_mp.info("[main] camera disabled — no camera worker spawned.")
     else:
-        raise ValueError(f"Unsupported camera: {args.camera}")
+        raise ValueError(f"Unsupported resolved camera type: {args.resolved_camera}")
 
     # ---- Recording (always-on) --------------------------------------
     specs += [{'target': worker_record, 'args': (events, shm_names, locks),
@@ -281,12 +339,30 @@ def cleanup(processes, managers):
 
 def main():
     args      = parse_args()
+
+    # camera 해석 (auto/serial → 실제 type+serial). args.resolved_camera, args.camera_serial 세팅.
+    args.resolved_camera, args.camera_serial, args.camera_name = resolve_camera(args)
+
     events    = create_events()
     locks     = create_locks()
     shm_names = get_shm_names()
     managers  = create_shm_managers(locks)
 
-    logger_mp.info(f"[main] hand={args.hand} camera={args.camera} vr_input={args.vr_input}")
+    # --no-robot: set_g1/set_hand 사전 set 으로 worker_g1_ik 가 FSM RUN 진입
+    if args.no_robot:
+        events['set_g1'].set()
+        events['set_hand'].set()
+        logger_mp.warning(
+            "[main] --no-robot: G1/hand 워커 spawn skip + set_g1/set_hand pre-set. "
+            "worker_g1_ik 는 정상 spawn 되어 Quest3 입력에 대한 IK 계산만 수행."
+        )
+
+    logger_mp.info(
+        f"[main] hand={args.hand} camera={args.resolved_camera} "
+        f"(serial={args.camera_serial}, name={args.camera_name}) "
+        f"vr_input={args.vr_input} waist={args.waist} head={args.head} "
+        f"no_robot={args.no_robot}"
+    )
     if args.hand == 'dex3' and args.vr_input == 'hand':
         logger_mp.warning(
             "[main] DEX3 + vr-input=hand: hand-tracking 경로는 25 landmark 입력이 "

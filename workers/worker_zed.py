@@ -93,8 +93,14 @@ def _create_workspace_mask(image, corners, ids):
 
     return mask, mask_contour, marker_corners_flat
 
-def worker_zed(shared_event, shm_name, shared_lock):
+def worker_zed(shared_event, shm_name, shared_lock, serial=None, zed_mode='direct'):
+    """ZED stereo worker.
 
+    Args:
+        serial: ZED device serial (int 또는 str). None 이면 첫 번째 device.
+        zed_mode: 'direct' (sl.Camera.open USB direct) | 'stream' (set_from_stream).
+                  stream 모드는 Jetson 등 외부 PC 가 ZED 를 들고 송신 중일 때만.
+    """
     # 3) SharedMemoryManager 초기화 (필요하다면 사용)
     camera_shm = SharedMemoryManager(CAMERA, shared_lock["camera_lock"], shm_name["camera_shm"])
     # [추가] ArUco 마커 정보 공유 메모리: 감지된 마커의 ID, 코너 좌표, 중심점 등 저장
@@ -108,15 +114,25 @@ def worker_zed(shared_event, shm_name, shared_lock):
     depth_map_shm = SharedMemoryManager(DEPTH_MAP, shared_lock["depth_map_lock"], shm_name["depth_map_shm"])
 
 
-    # ZED 초기화 (스트리밍 수신 모드)
+    # ZED 초기화 — mode 에 따라 direct (USB) 또는 stream 분기
     zed = sl.Camera()
     init_params = sl.InitParameters()
-    init_params.set_from_stream("192.168.5.11", 30000)  # ← 송신자 IP와 포트
-    # [변경] depth_mode 변경: 원본 NONE → PERFORMANCE (깊이 맵 데이터 수집 활성화)
+    if zed_mode == 'stream':
+        # 외부 송신자 PC 가 set_from_stream 으로 ZED 영상 송출 중인 경우.
+        init_params.set_from_stream("192.168.5.11", 30000)
+        logger_mp.info(f"[ZED] stream mode: receiving from 192.168.5.11:30000")
+    else:
+        # direct USB 연결. serial 명시 시 해당 device, 아니면 첫 device.
+        if serial is not None:
+            try:
+                init_params.set_from_serial_number(int(serial))
+                logger_mp.info(f"[ZED] direct mode: open serial={serial}")
+            except Exception as e:
+                logger_mp.warning(f"[ZED] set_from_serial_number({serial}) 실패: {e} — fallback any device")
+        else:
+            logger_mp.info("[ZED] direct mode: open first available device")
     init_params.depth_mode = sl.DEPTH_MODE.PERFORMANCE
     init_params.sdk_verbose = 1  # 디버깅용
-
-    # 나머지 init_param 설정은 그대로
     init_params.coordinate_units = sl.UNIT.METER
 
 
