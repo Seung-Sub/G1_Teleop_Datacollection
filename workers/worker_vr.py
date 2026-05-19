@@ -48,6 +48,18 @@ def worker_vr(shared_event, shm_name, shared_lock, vr_input="hand"):
 
     zero_keypoints = np.zeros((5, 3), dtype=np.float64)
 
+    # Record-control controller mapping (controller mode 만 해당):
+    #   Left X  (left_buttons[0]  aButton) rising-edge → record_mode.start toggle
+    #     - IDLE 상태 → start=True (새 에피소드 녹화 시작)
+    #     - RECORDING 상태 → start=True (worker_record 가 early-stop + save 처리)
+    #   Left Y  (left_buttons[1]  bButton) rising-edge → record_mode.reset = True (현 에피 폐기)
+    #   Right B (right_buttons[1] bButton) rising-edge → SET (start/reset/replay/done/deploy 전부 False).
+    #     worker_record 는 record_task_shm.task_name 이 비어있지 않으면 WAIT_FOR_SET→IDLE 로 자동 전이.
+    RECORD_BTN_THRESH = 0.5
+    prev_lx = False   # left aButton (= X)
+    prev_ly = False   # left bButton (= Y)
+    prev_rb = False   # right bButton (= B)
+
     logger_mp.info(f"[VR] start. vr_input={vr_input}")
 
     while not shared_event['shutdown'].is_set():
@@ -119,6 +131,45 @@ def worker_vr(shared_event, shm_name, shared_lock, vr_input="hand"):
                 right_buttons   =np.asarray(right_state[4:7], dtype=np.float32),
                 connected       =np.bool_(connected),
             )
+
+            # ---- Record-control rising-edge → record_mode_shm ----
+            # left_state / right_state index: [trigger, squeeze, tx, ty, a, b, thumb_click]
+            lx_now = float(left_state[4])  >= RECORD_BTN_THRESH
+            ly_now = float(left_state[5])  >= RECORD_BTN_THRESH
+            rb_now = float(right_state[5]) >= RECORD_BTN_THRESH
+
+            if lx_now and not prev_lx:
+                # Toggle: worker_record 가 IDLE/RECORDING 양쪽에서 start=True 를 처리한다
+                # (RECORDING 중에는 early-stop + save 동작).
+                rm = record_mode_shm.read_data()
+                rm["start"]  = np.bool_(True)
+                rm["reset"]  = np.bool_(False)
+                rm["replay"] = np.bool_(False)
+                rm["done"]   = np.bool_(False)
+                record_mode_shm.write_data(**rm)
+                logger_mp.info("[VR] Left-X edge -> Record START toggle (worker_record handles).")
+            prev_lx = lx_now
+
+            if ly_now and not prev_ly:
+                rm = record_mode_shm.read_data()
+                rm["reset"]  = np.bool_(True)
+                rm["start"]  = np.bool_(False)
+                rm["replay"] = np.bool_(False)
+                rm["done"]   = np.bool_(False)
+                record_mode_shm.write_data(**rm)
+                logger_mp.info("[VR] Left-Y edge -> Record DROP (reset current episode).")
+            prev_ly = ly_now
+
+            if rb_now and not prev_rb:
+                rm = record_mode_shm.read_data()
+                rm["start"]  = np.bool_(False)
+                rm["reset"]  = np.bool_(False)
+                rm["replay"] = np.bool_(False)
+                rm["done"]   = np.bool_(False)
+                rm["deploy"] = np.bool_(False)
+                record_mode_shm.write_data(**rm)
+                logger_mp.info("[VR] Right-B edge -> SET (worker_record WAIT_FOR_SET→IDLE if task_name set in GUI).")
+            prev_rb = rb_now
 
         last_time = now
 

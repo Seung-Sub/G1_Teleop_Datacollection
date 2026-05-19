@@ -5,7 +5,7 @@ from scipy.spatial.transform import Rotation as R
 
 from utils.state import State, EventsSnapshot, next_state
 from utils.rate import Rate
-from utils.mat_tool import fast_mat_inv
+from utils.mat_tool import fast_mat_inv, cosine_ease, se3_interp
 
 from sharedmemory.shmManager import SharedMemoryManager
 from sharedmemory.shm_schema import (
@@ -31,6 +31,10 @@ WAIST_GAIN        = np.array([1.0, 1.0, 1.0])    # HMD delta -> waist target 매
 # (1934 - 2048) / (4096 / 2π) = -0.17486 rad. yaw=0(center), pitch=-0.175(약 -10° 아래로 기울임).
 # 이 값은 카메라 mount install 자세에 맞춰진 hardware-specific ready 자세.
 HEAD_READY_RAD    = np.array([0.0, -0.17486])
+
+# Recovery (Right-A 트리거) cosine ease 동안 controller 입력 전체 lockout.
+# 50Hz × 3.0s = 150 step. ease 끝나면 anchor 모두 reset 후 controller 입력 재개.
+RECOVERY_DURATION_SEC = 3.0
 
 
 def _events_snapshot(shared_event, g1_initialized: bool) -> EventsSnapshot:
@@ -97,6 +101,12 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand"):
     target_waist_q    = None
     # Ready 버튼 edge detection
     prev_right_a_btn = False
+    # Recovery state (cosine ease + controller 입력 lockout)
+    _recovery_active   = False
+    _recovery_start_t  = None
+    _recovery_T_l_from = None
+    _recovery_T_r_from = None
+    _recovery_waist_from = None
 
     first_loop = True
 
@@ -163,34 +173,80 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand"):
                     current_head    = robot_obs["obs_head"]
                     current_arm_q   = robot_obs["obs_arm"]
 
-                    if home:
-                        # 양쪽 모드 공통: VR/EE/head anchor 재설정
-                        base_left_pos  = left_wrist[:3, 3].copy()
-                        base_right_pos = right_wrist[:3, 3].copy()
-                        base_head_pos  = head_pose[:3, 3].copy()
-                        T_L_init, T_R_init, T_H_init = g1_ik_solver.init_pose()
-                        set_home = True
-                        # controller-mode 상태 초기화
-                        T_ee_target_l = T_L_init.copy()
-                        T_ee_target_r = T_R_init.copy()
-                        T_ctrl_anchor_l = T_ctrl_anchor_r = None
-                        T_ee_anchor_l = T_ee_anchor_r   = None
-                        waist_anchor_head = None
-                        waist_anchor_q    = None
-                        target_waist_q    = current_waist_q.copy()
-                        prev_grip_l = prev_grip_r = False
-                        prev_right_a_btn = False
-
-                        record_mode_data = record_mode_shm.read_data()
-                        record_mode_data["home"] = False
-                        record_mode_shm.write_data(**record_mode_data)
-
                     # ===========================================================
-                    # vr_input == "controller": clutch (grip-hold) + waist + ready
+                    # vr_input == "controller": recovery + clutch + waist + ready
                     # ===========================================================
                     if vr_input == "controller":
                         ctrl_data = quest_controller_shm.read_data()
 
+                        # ---- Recovery state machine (controller 입력 lockout) --
+                        # home rising-edge 감지: 현재 ee target / waist target 을
+                        # _from 으로 캡처하고 ease 시작. ease 동안 grip/trigger/
+                        # 다른 버튼은 모두 무시. ease 끝나면 anchor 전부 reset.
+                        if home and not _recovery_active:
+                            if T_L_init is None or T_R_init is None or T_H_init is None:
+                                T_L_init, T_R_init, T_H_init = g1_ik_solver.init_pose()
+                            if T_ee_target_l is None: T_ee_target_l = T_L_init.copy()
+                            if T_ee_target_r is None: T_ee_target_r = T_R_init.copy()
+                            _recovery_T_l_from = T_ee_target_l.copy()
+                            _recovery_T_r_from = T_ee_target_r.copy()
+                            _recovery_waist_from = (
+                                target_waist_q.copy() if target_waist_q is not None
+                                else current_waist_q.copy()
+                            )
+                            _recovery_active  = True
+                            _recovery_start_t = time.perf_counter()
+                            logger_mp.info(
+                                "[G1_IK] Recovery START — 3s cosine ease to ready pose, controller LOCKOUT."
+                            )
+
+                        if _recovery_active:
+                            elapsed = time.perf_counter() - _recovery_start_t
+                            alpha   = elapsed / RECOVERY_DURATION_SEC
+                            ease    = cosine_ease(alpha)
+                            T_ee_target_l  = se3_interp(_recovery_T_l_from, T_L_init, ease)
+                            T_ee_target_r  = se3_interp(_recovery_T_r_from, T_R_init, ease)
+                            target_waist_q = (1.0 - ease) * _recovery_waist_from + ease * np.zeros(3)
+
+                            rel_head_pose = T_H_init if T_H_init is not None else np.eye(4)
+                            seed_waist = target_waist_q
+                            current_lr_arm_qdml = np.concatenate((seed_waist, current_head, current_arm_q))
+                            sol_q, sol_tauff, _, _ = g1_ik_solver.solve_ik(
+                                T_ee_target_l, T_ee_target_r, rel_head_pose, current_lr_arm_qdml,
+                            )
+                            robot_action_shm.write_data(
+                                action_waist     =target_waist_q,
+                                action_waist_tauff=np.zeros(3),
+                                action_head      =HEAD_READY_RAD,
+                                action_arm       =sol_q[5:],
+                                action_arm_tauff =sol_tauff[5:],
+                            )
+
+                            if alpha >= 1.0:
+                                # ease 종료 — anchor 전체 reset + home flag clear
+                                _recovery_active   = False
+                                T_ctrl_anchor_l = T_ctrl_anchor_r = None
+                                T_ee_anchor_l   = T_ee_anchor_r   = None
+                                waist_anchor_head = None
+                                waist_anchor_q    = None
+                                # Right-A 는 현재값으로 sync — 사용자가 버튼을 계속 누르고 있어도
+                                # 즉시 새 recovery 가 트리거되지 않도록 함.
+                                prev_right_a_btn = float(ctrl_data["right_buttons"][0]) >= BUTTON_THRESH
+                                # Grip 은 False 로 리셋 — 사용자가 grip 을 잡고 있는 채로 recovery
+                                # 가 끝나면, 다음 cycle 에서 grip_l/r=True && prev=False 가 rising-edge
+                                # 로 인식되어 새 ready-pose 기준의 anchor 가 자연스럽게 캡처된다.
+                                # (current 로 sync 하면 anchor=None 상태에서 clutch 가 동작해 NPE.)
+                                prev_grip_l = False
+                                prev_grip_r = False
+                                rm = record_mode_shm.read_data()
+                                rm["home"] = False
+                                record_mode_shm.write_data(**rm)
+                                logger_mp.info("[G1_IK] Recovery COMPLETE — controller input re-enabled.")
+
+                            rate.sleep()
+                            continue
+
+                        # ---- 정상 controller-mode 로직 (recovery 비활성) -------
                         T_ctrl_l_now = ctrl_data["left_ctrl_mat"]
                         T_ctrl_r_now = ctrl_data["right_ctrl_mat"]
 
@@ -198,14 +254,14 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand"):
                         grip_r = float(ctrl_data["right_squeeze"]) >= GRIP_THRESH
 
                         # ---- ready button (right A) edge detection -------------
+                        # set_start 는 clear 하지 않는다 — recovery 동안 worker_g1_ctrl
+                        # 이 RUN state 유지해야 ease action 이 G1 으로 전달됨.
                         right_a = float(ctrl_data["right_buttons"][0]) >= BUTTON_THRESH
                         if right_a and not prev_right_a_btn:
-                            logger_mp.info("[G1_IK] Right-A pressed -> trigger HOME (ready pose).")
+                            logger_mp.info("[G1_IK] Right-A pressed -> HOME (smooth 3s recovery).")
                             rm = record_mode_shm.read_data()
-                            rm["home"]  = True
-                            rm["start"] = False
+                            rm["home"] = True
                             record_mode_shm.write_data(**rm)
-                            shared_event['set_start'].clear()
                         prev_right_a_btn = right_a
 
                         # ---- left arm clutch -----------------------------------
@@ -240,11 +296,17 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand"):
                         prev_grip_r = grip_r
 
                         # ---- waist clutch (HMD delta -> waist target) ----------
-                        # grip 한쪽 이상 누른 동안만 HMD 변화를 waist 에 반영.
+                        # 정책: 둘 중 하나의 grip 이라도 잡혀 있는 동안 anchor 유지.
+                        # 둘 다 떼면 anchor=None (다음 grip engage 시 새 anchor).
+                        # anchor q 는 *last target* 사용 (arm clutch 와 동일한 의미) —
+                        # current obs 를 쓰면 PID lag 만큼의 1-tick 백워드 jump 가 가능.
                         if grip_l or grip_r:
                             if waist_anchor_head is None:
                                 waist_anchor_head = head_pose.copy()
-                                waist_anchor_q    = current_waist_q.copy()
+                                waist_anchor_q = (
+                                    target_waist_q.copy() if target_waist_q is not None
+                                    else current_waist_q.copy()
+                                )
                             R_now    = head_pose[:3, :3]
                             R_anchor = waist_anchor_head[:3, :3]
                             R_delta  = R_now @ R_anchor.T
@@ -257,7 +319,7 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand"):
                         else:
                             waist_anchor_head = None
                             waist_anchor_q    = None
-                            # grip 미누름 시 현재 waist q 를 target 으로 freeze
+                            # grip 미누름 시 마지막 target 을 유지 (freeze).
                             if target_waist_q is None:
                                 target_waist_q = current_waist_q.copy()
 
@@ -286,6 +348,19 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand"):
                     # vr_input == "hand": 기존 home-rebase + 절대좌표 fallback
                     # ===========================================================
                     else:
+                        if home:
+                            # hand-mode home: VR base / IK init / set_home rebase 즉시 적용.
+                            # (controller-mode 의 cosine recovery 와 달리 hand-mode 는
+                            # 사용자가 손을 자연스럽게 새 위치에서 시작하면 되므로 instant rebase.)
+                            base_left_pos  = left_wrist[:3, 3].copy()
+                            base_right_pos = right_wrist[:3, 3].copy()
+                            base_head_pos  = head_pose[:3, 3].copy()
+                            T_L_init, T_R_init, T_H_init = g1_ik_solver.init_pose()
+                            set_home = True
+                            rm = record_mode_shm.read_data()
+                            rm["home"] = False
+                            record_mode_shm.write_data(**rm)
+
                         ik_head_pose = head_pose.copy()
                         ik_head_pose[2, 3] -= 0.6  # head_rmat translation z 보정 (기존 동작 유지)
 

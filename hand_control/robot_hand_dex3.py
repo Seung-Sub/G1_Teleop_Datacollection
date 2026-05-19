@@ -277,9 +277,13 @@ class Dex3_Controller:
                         logger_mp.info(f"[Dex3] RIGHT trigger toggle -> {'GRASP' if grasp_r else 'RELEASE'}")
                     prev_trig_l, prev_trig_r = trig_l, trig_r
 
+                    # home 명령 시 release 강제 + prev_trig 동기화 (lockout).
+                    # worker_g1_ik 의 cosine recovery 끝나면 home flag 가 자동 clear 됨.
                     if home:
                         grasp_l = False
                         grasp_r = False
+                        prev_trig_l = trig_l
+                        prev_trig_r = trig_r
 
                     left_q_target  = _grip_q_left(grasp_l,  self.thumb_yaw, self.thumb_bend)
                     right_q_target = _grip_q_right(grasp_r, self.thumb_yaw, self.thumb_bend)

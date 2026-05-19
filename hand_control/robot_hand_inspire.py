@@ -186,10 +186,15 @@ class Inspire_Controller:
                     prev_trig_l = trig_l
                     prev_trig_r = trig_r
 
-                    # home 명령 시 모두 release 로 강제
+                    # home 명령 시 모두 release 로 강제 + prev_trig 동기화로
+                    # recovery 중 / 직후 stale rising-edge 가 새 toggle 로 인식되지
+                    # 않도록 lockout. (recovery 끝나면 home flag 가 worker_g1_ik 에서
+                    # False 로 clear 되고, 그 다음 사이클부터 정상 trigger 토글 재개.)
                     if home:
                         grasp_l = False
                         grasp_r = False
+                        prev_trig_l = trig_l
+                        prev_trig_r = trig_r
 
                     # Build q_targets:
                     #   idx 0..3 = pinky/ring/middle/index proximal

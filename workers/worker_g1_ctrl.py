@@ -114,19 +114,13 @@ class G1CtrlWorker(DualRateWorker):
 
         # --- RUN: 액션 읽고 제어 입력(50 Hz) ---
         if self.state is State.RUN and self.g1_initialized:
-            
-            mode_data = self.record_mode_shm.read_data()
-            home = mode_data["home"]
+            # NOTE: home flag 처리는 더 이상 여기에 없다.
+            # controller-mode 에서는 worker_g1_ik 의 cosine ease (3s) 가 IK target 을
+            # ready pose 로 부드럽게 보간하면서 ctrl_lock 안의 velocity_limit clip 이
+            # 추가 안전망. hand-mode 에서는 worker_g1_ik 의 instant rebase 가 새로운
+            # base 좌표를 잡아준다. 어느 모드든 worker_g1_ctrl 은 단순히 ROBOT_ACTION
+            # 을 읽어 명령만 publish 한다.
 
-            if home:
-                # 홈 포즈 명령
-                self.g1_ctrl.ctrl_defualt_pose()
-                mode_data["home"] = False
-                mode_data["start"] = False
-                self.record_mode_shm.write_data(**mode_data)
-                self._shared_event['set_start'].clear()
-                return
-            
             # 액션 읽기
             action = self.robot_action_shm.read_data()
             
