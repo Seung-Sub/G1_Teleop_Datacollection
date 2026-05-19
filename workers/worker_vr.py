@@ -98,6 +98,7 @@ def worker_vr(shared_event, shm_name, shared_lock, vr_input="hand"):
                 right_hand=right_hand,
                 right_distal=right_distal,
                 right_proximal=right_proximal,
+                television_ts=np.int64(time.perf_counter_ns()),
             )
 
         else:  # vr_input == "controller"
@@ -106,6 +107,7 @@ def worker_vr(shared_event, shm_name, shared_lock, vr_input="hand"):
 
             # TELEVISION SHM: wrist target은 controller pose 그대로 (clutch/IK는 worker_g1_ik에서)
             # hand keypoints 필드들은 controller 모드에선 사용하지 않으므로 0 채움.
+            ts_ctrl = np.int64(time.perf_counter_ns())
             television_shm.write_data(
                 head_rmat=head_mat,
                 left_wrist_mat=left_ctrl_mat,
@@ -114,6 +116,7 @@ def worker_vr(shared_event, shm_name, shared_lock, vr_input="hand"):
                 right_hand=zero_keypoints,
                 right_distal=zero_keypoints,
                 right_proximal=zero_keypoints,
+                television_ts=ts_ctrl,
             )
 
             # QUEST_CONTROLLER SHM에 button/trigger state 적재.
@@ -130,6 +133,7 @@ def worker_vr(shared_event, shm_name, shared_lock, vr_input="hand"):
                 right_thumbstick=np.asarray(right_state[2:4], dtype=np.float32),
                 right_buttons   =np.asarray(right_state[4:7], dtype=np.float32),
                 connected       =np.bool_(connected),
+                controller_ts   =ts_ctrl,
             )
 
             # ---- Record-control rising-edge → record_mode_shm ----

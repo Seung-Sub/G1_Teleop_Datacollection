@@ -68,7 +68,10 @@ def worker_camera(shared_event, shm_name, shared_lock):
                     raise RuntimeError("No color frame")
 
                 color_image = np.asanyarray(color_frame.get_data())
-                camera_shm.write_data(realsense=color_image)
+                camera_shm.write_data(
+                    realsense=color_image,
+                    camera_realsense_ts=np.int64(time.perf_counter_ns()),
+                )
 
                 missed_count = 0  # 정상 수신 시 리셋
 

@@ -12,7 +12,7 @@ def worker_hand_l_dds(ip, LR, name,  shm_name, shared_lock, network=None):
     call_count = 0
     start_time = time.perf_counter()
     time.sleep(0.5)
-    
+
     try:
         while True:
             data_dict = handler.read()
@@ -21,6 +21,7 @@ def worker_hand_l_dds(ip, LR, name,  shm_name, shared_lock, network=None):
             touch_dict = data_dict["touch"]
             # touch_dict의 키 이름은 LEFT_TOUCH_SENSOR_LAYOUT의 필드 이름과 일치해야 합니다.
             mapped = { f"l_{k}": np.array(v, dtype=np.int16) for k, v in touch_dict.items() }
+            mapped["l_touch_ts"] = np.int64(time.perf_counter_ns())
             left_touch_shm.write_data(**mapped)
             time.sleep(0.001)
 
@@ -53,6 +54,7 @@ def worker_hand_r_dds(ip, LR, name, shm_name, shared_lock, network=None):
             touch_dict = data_dict["touch"]
             # touch_dict의 키 이름은 RIGHT_TOUCH_SENSOR_LAYOUT의 필드 이름과 일치해야 합니다.
             mapped = { f"r_{k}": np.array(v, dtype=np.int16) for k, v in touch_dict.items() }
+            mapped["r_touch_ts"] = np.int64(time.perf_counter_ns())
             right_touch_shm.write_data(**mapped)
 
             time.sleep(0.001)

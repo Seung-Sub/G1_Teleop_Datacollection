@@ -168,12 +168,13 @@ class G1CtrlWorker(DualRateWorker):
         else:
             obs_head  = np.zeros(2, dtype=np.float32)
 
-        # SHM 쓰기
+        # SHM 쓰기 — body obs ts 도 함께 (hand obs ts 는 worker_hand_ctrl 가 관리)
         self.robot_obs_shm.write_data(
             obs_leg=obs_leg,
             obs_waist=obs_waist,
             obs_head=obs_head,
-            obs_arm=obs_arm
+            obs_arm=obs_arm,
+            obs_body_ts=np.int64(time.perf_counter_ns()),
         )
 
     # 리소스 정리

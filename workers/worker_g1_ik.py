@@ -337,6 +337,7 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand"):
                         # head 도 init 고정(0)이므로 IK 결과 대신 0 사용해도 무방하지만
                         # IK 가 head dof 를 안 건드린다는 보장이 없으므로 그대로 두면 0 근처 유지.
                         robot_action_shm.write_data(
+                            action_body_ts   =np.int64(time.perf_counter_ns()),
                             action_waist     =target_waist_q,
                             action_waist_tauff=np.zeros(3),
                             action_head      =HEAD_READY_RAD,               # controller 모드: 머리는 ready-pose([2048,1934])로 고정
@@ -400,6 +401,7 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand"):
                             )
 
                         robot_action_shm.write_data(
+                            action_body_ts   =np.int64(time.perf_counter_ns()),
                             action_waist     =sol_q[:3],
                             action_waist_tauff=sol_tauff[:3],
                             action_head      =sol_q[3:5],
@@ -476,6 +478,7 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand"):
                     sol_q = replay_g1_data[idx]
 
                     robot_action_shm.write_data(
+                        action_body_ts=np.int64(time.perf_counter_ns()),
                         action_waist=sol_q[:3],
                         action_arm=sol_q[5:],
                         action_head=sol_q[3:5]

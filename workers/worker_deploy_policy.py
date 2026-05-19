@@ -419,7 +419,10 @@ class Gr00t_Inference:
         n = min(len(hand_action_np), 14)
         hand14[:n] = hand_action_np[:n].astype(np.float64)
 
+        ts_pub = np.int64(time.perf_counter_ns())
         self.robot_action_shm.write_data(
+            action_body_ts   =ts_pub,
+            action_hand_ts   =ts_pub,
             action_waist     =action_waist.astype(np.float64),
             action_waist_tauff=np.zeros(3, dtype=np.float64),
             action_head      =action_head.astype(np.float64),

@@ -145,8 +145,9 @@ def worker_hand_ctrl(shared_event, shm_name, shared_lock,
                     n        = len(dual_hand_state_array)
                     obs14[:n] = dual_hand_state_array[:]
                     act14[:n] = dual_hand_action_array[:]
-                    robot_obs_shm.write_data(obs_hand=obs14)
-                    robot_action_shm.write_data(action_hand=act14)
+                    ts_hand = np.int64(time.perf_counter_ns())
+                    robot_obs_shm.write_data(obs_hand=obs14, obs_hand_ts=ts_hand)
+                    robot_action_shm.write_data(action_hand=act14, action_hand_ts=ts_hand)
 
 
                 if replay and not replay_demo_init :
@@ -250,7 +251,10 @@ def worker_hand_ctrl(shared_event, shm_name, shared_lock,
                 obs14 = np.zeros(14, dtype=np.float64)
                 n     = len(dual_hand_state_array)
                 obs14[:n] = dual_hand_state_array[:]
-                robot_obs_shm.write_data(obs_hand=obs14)
+                robot_obs_shm.write_data(
+                    obs_hand=obs14,
+                    obs_hand_ts=np.int64(time.perf_counter_ns()),
+                )
             
                 rate.sleep()
 

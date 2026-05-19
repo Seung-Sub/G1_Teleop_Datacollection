@@ -222,7 +222,7 @@ def worker_zed(shared_event, shm_name, shared_lock):
                 depth_resized = cv2.resize(depth_image_float, (640, 480), interpolation=cv2.INTER_AREA)
                 
                 # 뎁스맵 공유 메모리에 쓰기 (deploy 등 다른 워커에서 사용)
-                depth_map_shm.write_data(depth_map=depth_resized)
+                depth_map_shm.write_data(depth_map=depth_resized, depth_map_ts=np.int64(time.perf_counter_ns()))
 
                 # [추가] Matplotlib으로 깊이 맵 실시간 플롯: 디버깅용 시각화
                 # --- Matplotlib으로 뎁스맵 실시간 플롯 ---
@@ -387,7 +387,11 @@ def worker_zed(shared_event, shm_name, shared_lock):
                 # [변경] camera_shm.write_data 변경: 원본에는 small_l, small_r를 직접 저장했지만,
                 #        여기서는 원본 이미지(small_l_raw, small_r_raw)를 저장 (마스킹은 다른 워커에서 수행)
                 # 공유 메모리에 카메라와 ArUco 데이터 저장
-                camera_shm.write_data(camera_left=small_l_raw, camera_right=small_r_raw)
+                camera_shm.write_data(
+                    camera_left=small_l_raw,
+                    camera_right=small_r_raw,
+                    camera_zed_ts=np.int64(time.perf_counter_ns()),
+                )
                 # [추가] ArUco 마커 정보를 공유 메모리에 저장: UI에 마커 위치 표시용
                 aruco_shm.write_data(
                     num_markers=num_markers,
