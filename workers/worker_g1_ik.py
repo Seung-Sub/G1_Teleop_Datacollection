@@ -110,6 +110,25 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand", waist_mod
     _recovery_T_r_from = None
     _recovery_waist_from = None
 
+    # Phase L4 (Part 2 P1-5): IK solve 시간 계측. rolling window 의 50 cycle 누적
+    # 후 avg/p95/max ms 를 freq_shm 에 publish. 50Hz 예산 (20ms) 초과 빈도 정량화용.
+    from collections import deque as _deque
+    _ik_solve_ms_window = _deque(maxlen=50)
+    _ik_publish_every = 25  # cycle (≈0.5초)
+    _ik_cycle_count = 0
+    def _publish_ik_stats(samples):
+        if not samples:
+            return
+        arr = np.asarray(samples, dtype=np.float64)
+        try:
+            freq_shm.write_data(
+                ik_solve_ms_avg=float(arr.mean()),
+                ik_solve_ms_p95=float(np.percentile(arr, 95)),
+                ik_solve_ms_max=float(arr.max()),
+            )
+        except Exception:
+            pass
+
     first_loop = True
 
     state = State.WAIT_CONNECT
@@ -213,9 +232,14 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand", waist_mod
                             rel_head_pose = T_H_init if T_H_init is not None else np.eye(4)
                             seed_waist = target_waist_q
                             current_lr_arm_qdml = np.concatenate((seed_waist, current_head, current_arm_q))
+                            _ik_t0 = time.perf_counter_ns()
                             sol_q, sol_tauff, _, _ = g1_ik_solver.solve_ik(
                                 T_ee_target_l, T_ee_target_r, rel_head_pose, current_lr_arm_qdml,
                             )
+                            _ik_solve_ms_window.append((time.perf_counter_ns() - _ik_t0) / 1e6)
+                            _ik_cycle_count += 1
+                            if _ik_cycle_count % _ik_publish_every == 0:
+                                _publish_ik_stats(_ik_solve_ms_window)
                             robot_action_shm.write_data(
                                 action_waist     =target_waist_q,
                                 action_waist_tauff=np.zeros(3),
@@ -337,9 +361,14 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand", waist_mod
                         # IK seed 의 waist 부분에 target_waist_q 를 넣어 일관성 유도
                         seed_waist = target_waist_q
                         current_lr_arm_qdml = np.concatenate((seed_waist, current_head, current_arm_q))
+                        _ik_t0 = time.perf_counter_ns()
                         sol_q, sol_tauff, _, _ = g1_ik_solver.solve_ik(
                             T_ee_target_l, T_ee_target_r, rel_head_pose, current_lr_arm_qdml,
                         )
+                        _ik_solve_ms_window.append((time.perf_counter_ns() - _ik_t0) / 1e6)
+                        _ik_cycle_count += 1
+                        if _ik_cycle_count % _ik_publish_every == 0:
+                            _publish_ik_stats(_ik_solve_ms_window)
 
                         # waist 는 우리가 직접 명령(IK 결과 sol_q[:3] 무시),
                         # head 도 init 고정(0)이므로 IK 결과 대신 0 사용해도 무방하지만
@@ -399,14 +428,24 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand", waist_mod
                             rel_head_pose[:3,  3] = goal_p_H
 
                             current_lr_arm_qdml = np.concatenate((current_waist_q, current_head, current_arm_q))
+                            _ik_t0 = time.perf_counter_ns()
                             sol_q, sol_tauff, _, _ = g1_ik_solver.solve_ik(
                                 rel_left_wrist, rel_right_wrist, rel_head_pose, current_lr_arm_qdml,
                             )
+                            _ik_solve_ms_window.append((time.perf_counter_ns() - _ik_t0) / 1e6)
+                            _ik_cycle_count += 1
+                            if _ik_cycle_count % _ik_publish_every == 0:
+                                _publish_ik_stats(_ik_solve_ms_window)
                         else:
                             current_lr_arm_qdml = np.concatenate((current_waist_q, current_head, current_arm_q))
+                            _ik_t0 = time.perf_counter_ns()
                             sol_q, sol_tauff, _, _ = g1_ik_solver.solve_ik(
                                 left_wrist, right_wrist, ik_head_pose, current_lr_arm_qdml,
                             )
+                            _ik_solve_ms_window.append((time.perf_counter_ns() - _ik_t0) / 1e6)
+                            _ik_cycle_count += 1
+                            if _ik_cycle_count % _ik_publish_every == 0:
+                                _publish_ik_stats(_ik_solve_ms_window)
 
                         robot_action_shm.write_data(
                             action_body_ts   =np.int64(time.perf_counter_ns()),

@@ -68,6 +68,13 @@ WORKER_FREQ = [
     ("camera_freq",        (),    np.float64),
     ("aruco_freq",     (),    np.float64),
     ("record_freq",        (),    np.float64),
+    # Phase L4 (Part 2 P1-5): IK solve 시간 분포. worker_g1_ik 가 매 cycle
+    # 측정값을 ms 단위로 publish (각각 milliseconds).
+    # avg/p95/max 는 rolling window (마지막 50 cycle 기준) 기준.
+    # 20ms 예산 (50Hz) 초과 빈도 정량화에 사용.
+    ("ik_solve_ms_avg", (),    np.float64),
+    ("ik_solve_ms_p95", (),    np.float64),
+    ("ik_solve_ms_max", (),    np.float64),
 ]
 
 

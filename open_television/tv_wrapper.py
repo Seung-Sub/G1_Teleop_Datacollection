@@ -206,10 +206,12 @@ class TeleVisionWrapper:
         right_state = self.tv.right_ctrl_state
         connected   = self.tv.is_controller_connected
 
-        # Phase K9 (P2-6) TODO: 향후 wrist pose (4x4 SE(3)) 를 parquet 의 state/action
-        # 벡터에 저장하기 시작하면, utils/record_collectors.align_and_save_episode 에서
-        # interp_to_axis 로 4x4 를 원소별 linear 보간하면 회전행렬의 직교성이 깨진다.
-        # 그 경우 translation([:3,3]) 은 linear, rotation([:3,:3]) 은 quaternion SLERP
-        # (utils.mat_tool._quat_slerp / se3_interp 활용 가능) 으로 분리해야 한다.
+        # Phase K9 (P2-6) / Part 2 P2-9 TODO: 향후 wrist pose (4x4 SE(3)) 를 parquet
+        # 의 state/action 벡터에 저장하기 시작하면, utils/record_collectors.
+        # align_and_save_episode 에서 interp_to_axis 로 4x4 를 원소별 linear 보간하면
+        # 회전행렬의 직교성이 깨진다. 그 경우 translation([:3,3]) 은 linear,
+        # rotation([:3,:3]) 은 quaternion SLERP 로 분리해야 한다.
+        # 재사용 가능 자산: utils.mat_tool.se3_interp(T_from, T_to, alpha) — 이미 구현됨
+        # (translation linear + rotation quat SLERP). 새로 짤 필요 없음 — 호출만 하면 됨.
         # 현재는 wrist pose 가 SHM 에는 있지만 parquet 에 저장되지 않으므로 영향 없음.
         return head_mat, left_ctrl_mat, right_ctrl_mat, left_state, right_state, connected

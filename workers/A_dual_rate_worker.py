@@ -12,7 +12,19 @@ logger_mp = logging_mp.get_logger(__name__)
 from utils.rate import Rate
 
 class DualRateWorker:
-    """20 Hz와 300 Hz 루프를 각각 별도 스레드에서 돌리는 기본 구조."""
+    """20Hz와 300Hz 루프를 각각 별도 스레드에서 돌리는 기본 구조.
+
+    Phase L6 (Part 2 P2-7) GIL 한계 명시:
+        본 클래스는 같은 *프로세스* 의 두 스레드 (slow / fast) 로 do_slow / do_fast
+        실행. Python GIL 때문에 두 스레드는 진짜 병렬이 아니다. 다만:
+          - do_fast 의 obs 읽기는 대부분 C 확장 (numpy, DDS Read) 이라 GIL 을 자주
+            놓아 실측상 300Hz 가 나올 수 있다.
+          - Phase K2 (LowState recv_ts) 적용 후 do_fast 가 같은 LowState 를 중복
+            기록하지 않으므로 300Hz 폴링이 LowState 실제 갱신율 (~500Hz 가정) 이하
+            라면 dedup 으로 버려지는 낭비.
+        실측 후 (REMAINING_VERIFICATION_TASKS.md L4) freq_shm.g1_freq 가 의도한
+        300Hz 인지 확인. 안 나오면 do_fast 주기를 실제 갱신율에 맞춰 조정.
+    """
 
     def __init__(self, slow_hz: float = 20, fast_hz: float = 300):
         # 주기 정의
