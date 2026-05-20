@@ -30,7 +30,7 @@ from sharedmemory.shm_schema import (
     LEFT_TOUCH_SENSOR_LAYOUT, RIGHT_TOUCH_SENSOR_LAYOUT,
     WORKER_FREQ, GR00T_TASK_LAYOUT, ROBOT_OBS, ROBOT_ACTION,
     MASK_CONTROL_LAYOUT, DEPTH_MAP, TELEOP_CONFIG, QUEST_CONTROLLER,
-    HAND_MAPPING, CAMERA_MAPPING, VR_INPUT_MAPPING, WAIST_MAPPING, HEAD_MAPPING,
+    HAND_MAPPING, CAMERA_MAPPING, VR_INPUT_MAPPING, WAIST_MAPPING, HEAD_MAPPING, TACTILE_MAPPING,
 )
 # NOTE: worker_vr / television / Vuer imports are deferred into
 # get_worker_specs() because the params-proto library (a Vuer
@@ -154,6 +154,10 @@ def parse_args():
                         help="Waist 제어 모드: 'hmd' = HMD 변위로 waist 제어, 'fixed' = init q 고정")
     parser.add_argument('--head',  choices=list(HEAD_MAPPING.keys()),  default='dxl',
                         help="Head Dynamixel: 'dxl' = 사용, 'off' = 비활성 (Dynamixel 없는 G1 / 데이터 수집 시 head 고정)")
+    parser.add_argument('--tactile', choices=list(TACTILE_MAPPING.keys()), default='off',
+                        help="DEX3 압력센서 (HandState_.press_sensor_state): 'off' = 미사용 (default), "
+                             "'on' = subscribe thread 가 메시지의 press_sensor_state.length 를 로깅. "
+                             "실 device 의 sequence length 확정 후 SHM/parquet 컬럼 추가는 후속 작업.")
     # Inspire thumb 사전 자세 (vr_input=controller 일 때만 사용; 손가락 4개는 trigger로 토글)
     # 값 범위: 0.0(굽힘/안쪽) ~ 1.0(펼침/바깥쪽). 물체에 따라 잡기 편한 자세를 사전 설정.
     parser.add_argument('--thumb-bend', dest='thumb_bend', type=float, default=0.5,
@@ -269,11 +273,12 @@ def write_teleop_config(locks, shm_names, args):
         cam_type_str = 'none'
     cfg = SharedMemoryManager(TELEOP_CONFIG, locks["record_lock"], shm_names["teleop_config_shm"])
     cfg.write_data(
-        hand_type  =np.int32(HAND_MAPPING[args.hand]),
-        camera_type=np.int32(CAMERA_MAPPING.get(cam_type_str, CAMERA_MAPPING['none'])),
-        vr_input   =np.int32(VR_INPUT_MAPPING[args.vr_input]),
-        waist_mode =np.int32(WAIST_MAPPING[args.waist]),
-        head_mode  =np.int32(HEAD_MAPPING[args.head]),
+        hand_type   =np.int32(HAND_MAPPING[args.hand]),
+        camera_type =np.int32(CAMERA_MAPPING.get(cam_type_str, CAMERA_MAPPING['none'])),
+        vr_input    =np.int32(VR_INPUT_MAPPING[args.vr_input]),
+        waist_mode  =np.int32(WAIST_MAPPING[args.waist]),
+        head_mode   =np.int32(HEAD_MAPPING[args.head]),
+        tactile_mode=np.int32(TACTILE_MAPPING[args.tactile]),
     )
     cfg.worker_close()
 
@@ -320,7 +325,7 @@ def get_worker_specs(args, events, locks, shm_names):
             from workers.worker_hand_dds  import worker_hand_r_dds, worker_hand_l_dds
             specs += [
                 {'target': worker_hand_ctrl,
-                 'args':   (events, shm_names, locks, args.hand, args.vr_input, args.thumb_bend, args.thumb_yaw),
+                 'args':   (events, shm_names, locks, args.hand, args.vr_input, args.thumb_bend, args.thumb_yaw, args.tactile),
                  'name':   'WORKER_HAND'},
                 # Inspire 전용 터치센서 Modbus DDS
                 {'target': worker_hand_r_dds, 'args': ('192.168.123.210', 'r', 'Right-hand process', shm_names, locks),
@@ -332,9 +337,10 @@ def get_worker_specs(args, events, locks, shm_names):
             from workers.worker_hand_ctrl import worker_hand_ctrl
             specs += [
                 {'target': worker_hand_ctrl,
-                 'args':   (events, shm_names, locks, args.hand, args.vr_input, args.thumb_bend, args.thumb_yaw),
+                 'args':   (events, shm_names, locks, args.hand, args.vr_input, args.thumb_bend, args.thumb_yaw, args.tactile),
                  'name':   'WORKER_HAND'},
-                # DEX3 는 별도 터치센서 DDS 가 없다 — worker_hand_*_dds 미동작
+                # DEX3 는 별도 터치센서 DDS 가 없다 — press_sensor_state 는 HandState_ 메시지에 함께 포함됨.
+                # tactile=on 시 robot_hand_dex3 가 length 로깅.
             ]
         else:
             raise ValueError(f"Unsupported hand hardware: {args.hand}")

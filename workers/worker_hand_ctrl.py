@@ -29,11 +29,14 @@ def _events_snapshot(shared_event, hand_initialized: bool) -> EventsSnapshot:
 
 def worker_hand_ctrl(shared_event, shm_name, shared_lock,
                      hand="inspire",
-                     vr_input="hand", thumb_bend=0.5, thumb_yaw=0.5):
+                     vr_input="hand", thumb_bend=0.5, thumb_yaw=0.5,
+                     tactile='off'):
     """hand: 'inspire' (6+6 DOF, Inspire DDS) or 'dex3' (7+7 DOF, unitree_hg DDS).
     vr_input='hand' uses dex_retargeting from VR keypoints; vr_input='controller'
     uses Quest3 controller trigger as a grasp/release toggle, with thumb_bend/thumb_yaw
-    (0..1) selecting a pre-set thumb pose."""
+    (0..1) selecting a pre-set thumb pose.
+    tactile: 'off' (default) | 'on'. Phase K8: on 시 DEX3 가 HandState.press_sensor_state
+    length 를 로깅. 실제 SHM 저장은 SDK 실 device sequence length 확정 후 후속 작업."""
     #Set SharedMemory
     television_shm = SharedMemoryManager(TELEVISION, shared_lock["television_lock"], shm_name["television_shm"])
     freq_shm = SharedMemoryManager(WORKER_FREQ, shared_lock["freq_lock"], shm_name["freq_shm"])
@@ -108,6 +111,7 @@ def worker_hand_ctrl(shared_event, shm_name, shared_lock,
                                 dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array,
                                 fps=100.0, Unit_Test=False,
                                 vr_input=vr_input, thumb_bend=thumb_bend, thumb_yaw=thumb_yaw,
+                                collect_tactile=(tactile == 'on'),  # Phase K8
                             )
                         else:
                             raise ValueError(f"Unsupported hand hardware: {hand}")

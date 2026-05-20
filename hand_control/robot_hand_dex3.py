@@ -122,8 +122,15 @@ class Dex3_Controller:
                  dual_hand_state_array=None,
                  dual_hand_action_array=None,
                  fps=100.0, Unit_Test=False,
-                 vr_input="hand", thumb_bend=0.5, thumb_yaw=0.5):
+                 vr_input="hand", thumb_bend=0.5, thumb_yaw=0.5,
+                 collect_tactile=False):
         logger_mp.info("Initialize Dex3_Controller...")
+        # Phase K8 (P1-5): 압력센서 (press_sensor_state) 수집 on/off.
+        # off (default) — 기존 동작 100% 유지. on — _subscribe_hand_state 가 메시지의
+        # press_sensor_state sequence length 만 첫 번째 메시지에서 로깅. SHM 저장은
+        # sequence length 확정 후 후속 작업.
+        self.collect_tactile = bool(collect_tactile)
+        self._tactile_logged = {'l': False, 'r': False}
 
         import yaml
         cfg = yaml.safe_load(open("utils/lan_config.yaml"))
@@ -231,6 +238,33 @@ class Dex3_Controller:
                     self.left_state_recv_ts  = recv_ts
                 else:
                     self.right_state_recv_ts = recv_ts
+                # Phase K8 (P1-5): tactile=on 시 press_sensor_state sequence length
+                # 만 첫 메시지에서 1회 로깅. SDK IDL 사실 (PressSensorState_.pressure
+                # = float32[12], temperature = float32[12]) 은 확정. 그러나 HandState_
+                # 의 press_sensor_state 는 sequence (가변 길이 list of PressSensorState_)
+                # 라 N 개 객체가 도착하는지는 실 device 확인 필요. 외부 자료는 N=9
+                # 라고 명시 (사용자 검증). 본 로깅으로 실측 후 SHM schema 확정 → 후속
+                # 작업에서 dex3_tactile_shm 추가 + parquet observation.sensor 활용.
+                if self.collect_tactile and not self._tactile_logged.get(side, False):
+                    try:
+                        seq = getattr(msg, 'press_sensor_state', None)
+                        if seq is None:
+                            logger_mp.warning(f"[Dex3:{side}] tactile=on but HandState has no press_sensor_state attr")
+                        else:
+                            n_objs = len(seq)
+                            if n_objs > 0:
+                                # 첫 객체의 pressure 배열 길이 (IDL: float32[12])
+                                p_len = len(getattr(seq[0], 'pressure', []))
+                            else:
+                                p_len = 0
+                            logger_mp.info(
+                                f"[Dex3:{side}] tactile press_sensor_state: "
+                                f"{n_objs} objects, each pressure[{p_len}]. "
+                                f"Total tactile values per hand = {n_objs * p_len}."
+                            )
+                    except Exception as e:
+                        logger_mp.warning(f"[Dex3:{side}] tactile length 로깅 실패: {e}")
+                    self._tactile_logged[side] = True
             time.sleep(0.002)
 
     def get_hand_state_recv_ts(self) -> int:
