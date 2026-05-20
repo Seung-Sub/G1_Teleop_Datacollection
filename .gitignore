@@ -1,0 +1,34 @@
+# Secrets / Vuer TLS
+cert.pem
+key.pem
+*.pem
+*.key
+
+# Python build artefacts
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+build/
+dist/
+
+# Local conda env packaging
+.conda/
+.python-version
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Local data not for sync
+record/**/data/
+record/**/videos/
+record/**/meta/
+*.parquet
+*.mp4
+
+# OS
+.DS_Store
+Thumbs.db

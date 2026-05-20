@@ -50,8 +50,13 @@ os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = " ".join([
     "--no-sandbox",
 ])
 
-# Logging
-logging_mp.basic_config(level=logging_mp.INFO)
+# Logging — try/except 로 fail-soft. (worker module 들이 module-level 에서 이미
+# get_logger 를 호출했을 가능성이 있어, logging_mp 가 "이미 시작됨" 으로 raise 할
+# 수 있다. 그 경우 logger 는 default 설정으로 진행.)
+try:
+    logging_mp.basic_config(level=logging_mp.INFO)
+except RuntimeError:
+    pass
 logger_mp = logging_mp.get_logger(__name__)
 
 # Shared-memory configurations: layout constant, shm name, lock key

@@ -157,30 +157,45 @@ Unitree **G1** 휴머노이드 (양손 **Inspire** 또는 **DEX3**) 를 **Meta Q
 
 ## 4. 설치
 
-```bash
-# 1) conda env (Python 3.8 권장)
-conda create -n teleop python=3.8 -y
-conda activate teleop
-python -m pip install --upgrade pip wheel setuptools
+**전체 설치 절차는 [`docs/INSTALL.md`](docs/INSTALL.md) 참고.** 2026-05-20 에 검증된
+정확한 명령 시퀀스 + 버전 + 자주 만나는 오류 대처법까지 포함되어 있습니다.
 
-# 2) PyTorch 등 학습 의존성 (옵션, eval 시 필요)
-# 3) 본 워크스페이스 install
-cd /path/to/G1_Teleoperation
+요약:
+```bash
+# 1) conda env
+conda create -n teleop python=3.8 -c conda-forge -y && conda activate teleop
+
+# 2) core (pinocchio + casadi 는 conda-forge, 나머지는 pip)
+conda install -c conda-forge -y pinocchio casadi
+pip install 'numpy<2' scipy 'opencv-python<4.11' pyarrow pandas pyyaml 'imageio[ffmpeg]' pyqt5
+
+# 3) Vuer (Python 3.8 호환 monkey-patch 포함 — INSTALL.md §3 참고)
+pip install --no-deps 'vuer==0.0.60' 'params_proto'
+pip install aiohttp aiohttp-cors websockets msgpack dotvar pillow
+# params_proto 의 envvar.py 에 'from __future__ import annotations' 삽입
+
+# 4) Unitree SDK + DDS + Dynamixel + logging
+git clone https://github.com/unitreerobotics/unitree_sdk2_python.git ~/unitree_sdk2_python
+pip install -e ~/unitree_sdk2_python
+pip install cyclonedds dynamixel_sdk logging_mp
+# logging_mp 에 get_logger/basic_config alias 추가 — INSTALL.md §4-5
+
+# 5) 카메라 SDK (옵션)
+pip install pyrealsense2                       # RealSense
+# ZED: ZED SDK 설치 후 python /usr/local/zed/get_python_api.py
+
+# 6) 워크스페이스
 pip install -e .
 
-# 4) 외부 SDK 별도 설치
-#   - ZED SDK     : https://www.stereolabs.com/developers/release
-#   - pyrealsense2: pip install pyrealsense2
-#   - vuer        : pip install 'vuer[all]>=0.0.60,<0.1.0'
-#   - dynamixel_sdk: pip install dynamixel_sdk
-#   - unitree_sdk2py / inspire_sdkpy 는 각각 git clone 후 pip install -e .
+# 7) 검증
+QT_QPA_PLATFORM=offscreen python scripts/verify_offline.py
+# → SUMMARY  PASS=9  FAIL=0
 ```
 
 > 평가 (`evaluate.py`) 는 별도 conda env (예: `gr00t`) 에서 실행 권장. main.py 의
 > teleop env 와 충돌 회피.
 
-자세한 단계는 본 워크스페이스의 기존 환경 설치 자료 또는
-[`docs/HARDWARE.md`](docs/HARDWARE.md) 의 SDK 절을 참고.
+Quest 3 USB 연결은 별도 단계 — [`docs/QUEST3_SETUP.md`](docs/QUEST3_SETUP.md) 참고.
 
 ## 5. 실행 모드 + CLI
 
