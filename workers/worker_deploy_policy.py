@@ -35,7 +35,9 @@ from sharedmemory.shmManager import SharedMemoryManager
 from sharedmemory.shm_schema import (
     CAMERA, CAMERA_VIEW, GR00T_TASK_LAYOUT, RECORD_MODE_LAYOUT,
     ROBOT_ACTION, ROBOT_OBS, WORKSPACE_MASK, TELEOP_CONFIG, HAND_MAPPING_INV,
+    WAIST_MAPPING_INV, HEAD_MAPPING_INV,
 )
+from utils.modality_layout import build_state_layout, layout_from_modality_json
 
 import logging_mp
 logger_mp = logging_mp.get_logger(__name__)
@@ -87,100 +89,73 @@ def upsample_actions(seq: np.ndarray, slow_hz: float = 20.0, fast_hz: float = 50
 # Observation dict builders (GR00T DataConfig compatible)
 # =============================================================================
 
-def _split_qpos(qpos: np.ndarray):
-    """qpos = concat(obs_waist[3], obs_head[2], obs_arm[14]) = 19-D.
+def _parts_from_obs(qpos: np.ndarray, hand_qpos: np.ndarray, hand_type: str) -> dict:
+    """qpos (19D = waist3+head2+arm14) + hand_qpos (14D) 를 layout 이름별 dict 로.
 
-    Phase L1 (Part 2 §11 head 일관성 검증): 현재 modality_{inspire,dex3}.json 에
-    state.head 가 **없다** (state 는 waist + left_arm + right_arm + left/right_hand
-    만). 수집 측은 align_and_save_episode 가 obs_head 를 state_vec 에 포함하므로
-    실제로는 31D/33D 가 아니라 33D/35D 가 저장된다 (3+2+14+12 or 14).
-    → 후속 작업 (REMAINING_VERIFICATION_TASKS.md L6-A 참고): modality.json 에
-       state.head 추가 + 학습/배포에서 head 사용 여부 통일 필요.
-    현재는 deploy 측이 head 를 버려 modality.json 과 정합되도록 _split_qpos 유지.
+    Phase M (PART3 §2.5): build_state_layout 이 요구하는 name → array 매핑을 만들고,
+    layout 의 토글 (waist_on/head_on) 에 따라 필요한 키만 obs_dict 에 포함된다.
     """
-    waist     = qpos[:3].astype(np.float32)
-    # qpos[3:5] is head; modality.json 에 state.head 없어 의도적으로 버림.
-    left_arm  = qpos[5:12].astype(np.float32)
-    right_arm = qpos[12:19].astype(np.float32)
-    return waist, left_arm, right_arm
+    hd_side = 7 if hand_type == 'dex3' else 6
+    return {
+        'waist':      qpos[:3].astype(np.float32),
+        'head':       qpos[3:5].astype(np.float32),
+        'left_arm':   qpos[5:12].astype(np.float32),
+        'right_arm':  qpos[12:19].astype(np.float32),
+        'left_hand':  hand_qpos[:hd_side].astype(np.float32),
+        'right_hand': hand_qpos[hd_side:2 * hd_side].astype(np.float32),
+    }
 
 
-def _split_hand(hand_qpos: np.ndarray, hand_type: str):
-    """obs_hand (14D, Inspire 는 뒤 2개 0) → left_hand / right_hand 분리.
+def build_obs_dict(task_name: str, qpos: np.ndarray, hand_qpos: np.ndarray,
+                   frames: Dict[str, np.ndarray], hand_type: str,
+                   layout) -> dict:
+    """동적 obs dict (Phase M / PART3 §2.5).
 
-    hand_type='inspire': 6+6=12D (앞 12개 사용)
-    hand_type='dex3'   : 7+7=14D (전체 14개 사용)
+    layout: build_state_layout(...) 또는 layout_from_modality_json(...) 결과.
+            modality.json 에 들어있는 state 키만 obs dict 에 포함 — 즉 학습 데이터셋이
+            head 를 안 가지면 deploy 도 안 보냄. 차원 자동 정합.
+
+    frames: {role: rgb_np}. 'ego_left'/'ego_right' (ZED) 또는 'ego'/'wrist_l'/'wrist_r'
+            (RealSense). video.<role> 형식으로 dict 에 등록.
     """
-    if hand_type == 'dex3':
-        return hand_qpos[:7].astype(np.float32), hand_qpos[7:14].astype(np.float32)
-    # inspire
-    return hand_qpos[:6].astype(np.float32), hand_qpos[6:12].astype(np.float32)
-
-
-def obs_dict_multi_rs(task_name: str, qpos: np.ndarray, hand_qpos: np.ndarray,
-                      frames: Dict[str, np.ndarray], hand_type: str) -> dict:
-    """RealSense 멀티뷰 observation dict.
-
-    frames: {'ego': rgb_np, 'wrist_l': ..., 'wrist_r': ...}  — 활성 role 만 key 로.
-    GR00T DataConfig 의 video_keys 가 'video.ego', 'video.wrist_l', 'video.wrist_r'
-    (modality_{inspire,dex3}.json 의 video.<role> 와 동명) 에 맞춰진다고 가정.
-    DataConfig 측에서 새 키를 등록해야 함 (REMAINING_VERIFICATION_TASKS.md L1-B).
-    """
-    waist, left_arm, right_arm = _split_qpos(qpos)
-    left_hand, right_hand = _split_hand(hand_qpos, hand_type)
-    d = {
-        "state.waist":      waist[None, None, :],
-        "state.left_arm":   left_arm[None, None, :],
-        "state.right_arm":  right_arm[None, None, :],
-        "state.left_hand":  left_hand[None, None, :],
-        "state.right_hand": right_hand[None, None, :],
+    parts = _parts_from_obs(qpos, hand_qpos, hand_type)
+    d: dict = {
         "annotation.human.action.task_description": np.array([task_name], dtype=object),
     }
+    for name, _dim in layout:
+        d[f"state.{name}"] = parts[name][None, None, :]
     for role, rgb in frames.items():
         d[f"video.{role}"] = rgb[None, None, ...]
     return d
 
 
-def obs_dict_zed(task_name: str, qpos: np.ndarray, hand_qpos: np.ndarray,
-                 rgb_left: np.ndarray, rgb_right: Optional[np.ndarray],
-                 binocular: bool, hand_type: str) -> dict:
-    """ZED stereo (binocular) 또는 single-view obs dict. Legacy 호환."""
-    waist, left_arm, right_arm = _split_qpos(qpos)
-    left_hand, right_hand = _split_hand(hand_qpos, hand_type)
-    d = {
-        "video.ego_left_view":  rgb_left[None, None, ...],
-        "state.waist":          waist[None, None, :],
-        "state.left_arm":       left_arm[None, None, :],
-        "state.right_arm":      right_arm[None, None, :],
-        "state.left_hand":      left_hand[None, None, :],
-        "state.right_hand":     right_hand[None, None, :],
-        "annotation.human.action.task_description": np.array([task_name], dtype=object),
-    }
-    if binocular and rgb_right is not None:
-        d["video.ego_right_view"] = rgb_right[None, None, ...]
-    return d
-
-
-def action_to_array(action: dict, i: int, hand_type: str) -> tuple:
+def action_to_array(action: dict, i: int, hand_type: str, layout) -> tuple:
     """Pull one timestep out of a GR00T action chunk.
 
-    Phase L1: hand_type 으로 hand DOF 분기 (6+6 or 7+7).
-    GR00T action keys:
-        action.waist     (1, T, 3)
-        action.left_arm  (1, T, 7)   # 6 일 수도 — write_shm 의 fallback
-        action.right_arm (1, T, 7)
-        action.left_hand (1, T, 6 or 7)
-        action.right_hand(1, T, 6 or 7)
-    Returns (action_np[19], hand_action_np[12 or 14]) for write_shm.
-    """
-    waist     = np.asarray(action["action.waist"][0, i],     dtype=np.float32)  # (3,)
-    left_arm  = np.asarray(action["action.left_arm"][0, i],  dtype=np.float32)  # (6 or 7,)
-    right_arm = np.asarray(action["action.right_arm"][0, i], dtype=np.float32)  # (7,)
-    left_h    = np.asarray(action["action.left_hand"][0, i], dtype=np.float32)  # (6 or 7)
-    right_h   = np.asarray(action["action.right_hand"][0,i], dtype=np.float32)  # (6 or 7)
-    head      = np.zeros(2, dtype=np.float32)                                   # head not commanded
+    Phase M: layout 에 따라 action.waist / action.head 포함 여부 결정. layout 에
+    없는 key 는 GR00T action dict 에도 없을 것 (학습 측 DataConfig.action_keys 와
+    정합). 누락 시 default zero.
 
-    action_np   = np.concatenate([waist, head, left_arm, right_arm], axis=0)    # 3+2+(6|7)+7
+    Returns (action_np[19] full body, hand_action_np[12 or 14]) for write_shm.
+    write_shm 은 SHM 의 fixed-shape 필드 (action_waist[3], action_head[2], action_arm[14],
+    action_hand[14]) 를 채우므로 layout 에서 빠진 모달리티는 zero 로 채워 publish.
+    """
+    layout_names = {n for n, _ in layout}
+
+    def _opt(key: str, dim: int) -> np.ndarray:
+        if key in action:
+            return np.asarray(action[key][0, i], dtype=np.float32)
+        return np.zeros(dim, dtype=np.float32)
+
+    waist = _opt("action.waist", 3) if 'waist' in layout_names else np.zeros(3, dtype=np.float32)
+    head  = _opt("action.head",  2) if 'head'  in layout_names else np.zeros(2, dtype=np.float32)
+    left_arm  = _opt("action.left_arm",  7)
+    right_arm = _opt("action.right_arm", 7)
+    hd_side = 7 if hand_type == 'dex3' else 6
+    left_h  = _opt("action.left_hand",  hd_side)
+    right_h = _opt("action.right_hand", hd_side)
+
+    action_np   = np.concatenate([waist, head, left_arm, right_arm], axis=0)    # 19 (3+2+7+7)
     hand_action = np.concatenate([left_h, right_h], axis=0)                     # 12 or 14
     return action_np, hand_action
 
@@ -250,6 +225,7 @@ class Gr00t_Inference:
         lag_compensate: bool = True,
         lag_log_every: int = 50,
         obs_ts_policy: str = 'min',             # Phase L2: 'min' (stale 기준) | 'max'
+        modality_json_path: Optional[str] = None,  # Phase M4 (PART3 §2.5): 학습 데이터셋의 modality.json
     ):
         assert mode in ("gr00t_rs_multi", "gr00t_zed", "gr00t"), f"unsupported mode: {mode}"
         # 'gr00t' (legacy single RealSense) 는 alias for gr00t_rs_multi (ego only).
@@ -275,11 +251,12 @@ class Gr00t_Inference:
         self.lag_compensate  = bool(lag_compensate)
         self.lag_log_every   = max(1, int(lag_log_every))
         self.obs_ts_policy   = obs_ts_policy
+        self.modality_json_path = modality_json_path
         self._lag_chunk_count = 0
         self._lag_ns_acc      = 0
         self._lag_ns_max      = 0
 
-        # SHM handles + hand_type / active camera roles 결정
+        # SHM handles + hand_type / active camera roles 결정 + modality layout 로드
         self._init_shm(shm_name, shared_lock)
         self._resolve_runtime_config()
 
@@ -350,15 +327,48 @@ class Gr00t_Inference:
                     )
 
     def _resolve_runtime_config(self):
-        """teleop_config_shm 의 hand_type 을 읽어 자동 분기. main.py 가 owner-create
-        한 SHM 이므로 즉시 valid."""
+        """teleop_config_shm 의 hand_type + 토글 모드 → modality layout 결정.
+
+        Phase M4 (PART3 §2.5): modality.json 단일 진실 출처. 우선순위:
+          1. self.modality_json_path 명시 → 그 파일 layout 사용 (학습 데이터셋 메타)
+          2. teleop_config_shm 의 토글 (waist_mode/head_mode/hand_type) 로 build_state_layout
+        둘 다 안 되면 default (inspire / waist=on / head=on).
+        """
         self.hand_type = 'inspire'
+        waist_on = True
+        head_on  = True
         try:
             cfg = self.teleop_config_shm.read_data()
             self.hand_type = HAND_MAPPING_INV.get(int(cfg["hand_type"]), 'inspire')
+            waist_mode = WAIST_MAPPING_INV.get(int(cfg["waist_mode"]), 'hmd')
+            head_mode  = HEAD_MAPPING_INV.get(int(cfg["head_mode"]),  'dxl')
+            waist_on = (waist_mode == 'hmd')
+            head_on  = (head_mode  == 'dxl')
         except Exception as e:
-            logger_mp.warning(f"[Deploy] teleop_config read 실패: {e} — hand_type=inspire fallback")
+            logger_mp.warning(f"[Deploy] teleop_config read 실패: {e} — defaults 사용")
         self.hand_dim = 14 if self.hand_type == 'dex3' else 12
+
+        # modality.json 로드 (학습 데이터셋과 동일 layout 사용 위함).
+        self.layout = None
+        if self.modality_json_path:
+            try:
+                import json as _json
+                with open(self.modality_json_path) as f:
+                    m = _json.load(f)
+                self.layout = layout_from_modality_json(m)
+                logger_mp.info(
+                    f"[Deploy] modality.json layout loaded from {self.modality_json_path}: "
+                    f"{[(n, d) for n, d in self.layout]}"
+                )
+            except Exception as e:
+                logger_mp.warning(f"[Deploy] modality.json read 실패: {e} — fallback to TELEOP_CONFIG")
+        if self.layout is None:
+            self.layout = build_state_layout(self.hand_type, waist_on=waist_on, head_on=head_on)
+            logger_mp.info(
+                f"[Deploy] layout from TELEOP_CONFIG: hand={self.hand_type} "
+                f"waist_on={waist_on} head_on={head_on} → "
+                f"{[(n, d) for n, d in self.layout]}"
+            )
 
         if self.zed_mode:
             self.camera_roles: List[str] = ['ego_left'] + (['ego_right'] if self.binocular else [])
@@ -404,6 +414,7 @@ class Gr00t_Inference:
         # 카메라 frame + ts read. Phase L2: ts 후보에 카메라 ts 도 포함.
         ts_candidates = [t for t in (ts_body, ts_hand) if t > 0]
 
+        frames: Dict[str, np.ndarray] = {}
         if self.zed_mode:
             if self.legacy_camera_shm is None:
                 return None
@@ -424,13 +435,13 @@ class Gr00t_Inference:
                     mr = m["mask_right_flat"].reshape(right.shape[:2])
                     if mr.dtype != np.uint8:
                         right = (right * mr[..., None].astype(np.uint8)).astype(np.uint8)
-            obs = obs_dict_zed(self.task_name, qpos, hand_qpos, left, right,
-                               binocular=self.binocular, hand_type=self.hand_type)
+            frames['ego_left'] = left
+            if right is not None:
+                frames['ego_right'] = right
         else:
             # RealSense 멀티뷰 (Phase L1).
             if not self.camera_shms:
                 return None
-            frames: Dict[str, np.ndarray] = {}
             for role, shm in self.camera_shms.items():
                 d = shm.read_data()
                 cam_ts = int(d.get('frame_ts', 0))
@@ -442,7 +453,9 @@ class Gr00t_Inference:
                 frames[role] = rgb
             if not frames:
                 return None
-            obs = obs_dict_multi_rs(self.task_name, qpos, hand_qpos, frames, self.hand_type)
+        # Phase M4 (PART3 §2.5): 동적 obs dict (layout 기반).
+        obs = build_obs_dict(self.task_name, qpos, hand_qpos, frames,
+                             self.hand_type, self.layout)
 
         if not ts_candidates:
             return None
@@ -464,11 +477,14 @@ class Gr00t_Inference:
         action = self.policy.get_action(obs)
         t_after_ns = time.perf_counter_ns()
 
-        T = action["action.waist"].shape[1]
+        # chunk 길이 T: layout 에 따라 어느 action key 든 (waist / left_arm) 중 첫 활성
+        # key 의 shape 에서 추출. waist 가 layout 에 있으면 그것, 없으면 left_arm.
+        first_key = "action.waist" if 'waist' in {n for n, _ in self.layout} else "action.left_arm"
+        T = action[first_key].shape[1]
         full = []
         hand = []
         for i in range(T):
-            a_np, h_np = action_to_array(action, i, self.hand_type)
+            a_np, h_np = action_to_array(action, i, self.hand_type, self.layout)
             full.append(a_np)
             hand.append(h_np)
         full = np.stack(full, axis=0)

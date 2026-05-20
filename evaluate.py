@@ -103,6 +103,11 @@ def _parse_args():
                    help="obs_ts_ns 결정 (모든 modality ts 후보 중). "
                         "min = 가장 stale (의미상 정확, lag 보상 안전), "
                         "max = 가장 최근 (legacy 동작).")
+    # Phase M4 — modality.json 명시 (학습 데이터셋의 meta 파일)
+    p.add_argument("--modality-json", dest="modality_json", default=None,
+                   help="record/<task>/meta/modality.json 경로. 명시되면 layout 을 "
+                        "이 파일에서 읽어 obs/action dict 구성 (학습=배포 자동 정합). "
+                        "미명시 시 TELEOP_CONFIG SHM 의 토글로 build_state_layout 호출.")
     return p.parse_args()
 
 
@@ -133,6 +138,7 @@ def main():
         lag_compensate=args.lag_compensate,
         lag_log_every =args.lag_log_every,
         obs_ts_policy =args.obs_ts_policy,
+        modality_json_path=args.modality_json,
     )
 
     print(f"[evaluate] Running. UI must set Deploy=True to start policy loading.")

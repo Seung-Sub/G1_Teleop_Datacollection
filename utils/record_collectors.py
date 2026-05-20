@@ -28,6 +28,9 @@ import numpy as np
 from utils.raw_stream import RawStreamBuffer
 from utils.align import interp_to_axis, common_time_axis
 from utils.record_config import BASE_FOLDER
+from utils.modality_layout import (
+    build_state_layout, build_modality_json, concat_state_parts, layout_max_end,
+)
 
 import logging_mp
 logger_mp = logging_mp.get_logger(__name__)
@@ -39,44 +42,58 @@ DEFAULT_OUTPUT_HZ = 50.0
 
 
 # ============================================================================
-# Phase K6 (P1-8): modality.json hand 종류별 자동 배치
+# Phase M (PART3 §2): modality.json 동적 빌드 (정적 파일 복사 → 토글 기반 생성)
 # ============================================================================
 
 import os as _os
+import json as _json
 import shutil as _shutil
 
-_REPO_ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
-_MODALITY_SRC = {
-    'inspire': _os.path.join(_REPO_ROOT, 'utils', 'parquet', 'modality_inspire.json'),
-    'dex3':    _os.path.join(_REPO_ROOT, 'utils', 'parquet', 'modality_dex3.json'),
-}
 
-def _ensure_meta_modality(task_name: str, hand_type: str) -> None:
-    """record/<task>/meta/modality.json 에 hand 종류별 modality 파일 복사.
-    이미 존재하면 hand_type 변경 시에만 갱신 (사용자 수동 편집 보존)."""
-    src = _MODALITY_SRC.get(hand_type)
-    if src is None or not _os.path.exists(src):
-        logger_mp.warning(f"[Record] modality src not found for hand_type={hand_type}: {src}")
-        return
+def _ensure_meta_modality(
+    task_name: str,
+    hand_type: str = 'inspire',
+    waist_on:  bool = True,
+    head_on:   bool = True,
+    tactile_on: bool = False,
+    tactile_dim: int = 12,
+    camera_roles: Optional[List[str]] = None,
+) -> None:
+    """record/<task>/meta/modality.json 을 build_modality_json() 결과로 생성/갱신.
+
+    이전 (Phase K6) 의 정적 파일 복사 (modality_{inspire,dex3}.json) 는 폐기. 토글
+    조합에 따라 매번 동적으로 빌드. 이미 존재하면 layout 변경 시에만 갱신 +
+    이전 파일 .bak 백업.
+    """
+    new_m = build_modality_json(
+        hand_type=hand_type,
+        waist_on=waist_on,
+        head_on=head_on,
+        tactile_on=tactile_on,
+        tactile_dim=tactile_dim,
+        camera_roles=camera_roles,
+    )
     dst_dir = _os.path.join(BASE_FOLDER, task_name, 'meta')
     _os.makedirs(dst_dir, exist_ok=True)
     dst = _os.path.join(dst_dir, 'modality.json')
     if _os.path.exists(dst):
-        # 같은 hand_type 이면 skip. 다르면 백업 후 갱신.
         try:
             with open(dst) as f:
-                import json as _json
                 cur = _json.load(f)
-            cur_dim = int(cur.get('state', {}).get('right_hand', {}).get('end', 0))
-            new_dim = 33 if hand_type == 'dex3' else 31
-            if cur_dim == new_dim:
-                return  # 이미 정확
+            # state layout 동일하면 skip (사용자 수동 편집 보존).
+            if cur.get('state') == new_m['state'] and cur.get('video') == new_m['video']:
+                return
         except Exception:
             pass
         _shutil.copyfile(dst, dst + '.bak')
-        logger_mp.info(f"[Record] modality.json 갱신 (이전 → .bak): hand_type={hand_type}")
-    _shutil.copyfile(src, dst)
-    logger_mp.info(f"[Record] modality.json 배치: {dst} (hand_type={hand_type})")
+        logger_mp.info(f"[Record] modality.json 갱신 (이전 → .bak): {dst}")
+    with open(dst, 'w') as f:
+        _json.dump(new_m, f, indent=2)
+    logger_mp.info(
+        f"[Record] modality.json 빌드: {dst} "
+        f"(hand={hand_type}, waist_on={waist_on}, head_on={head_on}, "
+        f"tactile_on={tactile_on}, cameras={camera_roles})"
+    )
 
 
 class RecordCollectors:
@@ -90,12 +107,20 @@ class RecordCollectors:
             빈 dict 면 카메라 없음 (--camera none).
     """
 
-    def __init__(self, shm: Dict[str, object], camera_shms: Optional[Dict[str, object]] = None):
+    def __init__(self, shm: Dict[str, object], camera_shms: Optional[Dict[str, object]] = None,
+                 touch_shms: Optional[Dict[str, object]] = None):
+        """Args:
+            shm:         {'robot_obs','robot_action','television','controller'}
+            camera_shms: {role: SharedMemoryManager} — Phase K7-A
+            touch_shms:  {'left': SharedMemoryManager, 'right': SharedMemoryManager} or None.
+                         Phase M6 — Inspire LEFT/RIGHT_TOUCH_SENSOR SHM (tactile_on 일 때만).
+        """
         self.shm_obs   = shm['robot_obs']
         self.shm_act   = shm['robot_action']
         self.shm_tv    = shm['television']
         self.shm_ctrl  = shm['controller']
         self.camera_shms: Dict[str, object] = dict(camera_shms or {})
+        self.touch_shms:  Dict[str, object] = dict(touch_shms or {})
 
         self.bufs: Dict[str, RawStreamBuffer] = {
             'obs_body':    RawStreamBuffer('obs_body',    maxlen=300_000),
@@ -108,6 +133,10 @@ class RecordCollectors:
         # role 별 camera buffer 동적 생성 (Phase K7-A)
         for role in self.camera_shms.keys():
             self.bufs[f'camera_{role}'] = RawStreamBuffer(f'camera_{role}', maxlen=10_000)
+        # tactile buffer (Phase M6, Inspire 먼저 — LEFT/RIGHT touch sensors).
+        # DEX3 는 sequence length N 확정 후 같은 메커니즘에 차원만 채움.
+        for side in self.touch_shms.keys():
+            self.bufs[f'touch_{side}'] = RawStreamBuffer(f'touch_{side}', maxlen=200_000)
 
         self._stop = threading.Event()
         self._threads: List[threading.Thread] = []
@@ -124,9 +153,11 @@ class RecordCollectors:
             threading.Thread(target=self._poll_television, daemon=True, name='REC_TV'),
             threading.Thread(target=self._poll_camera,     daemon=True, name='REC_CAM'),
         ]
+        if self.touch_shms:
+            self._threads.append(threading.Thread(target=self._poll_touch, daemon=True, name='REC_TOUCH'))
         for t in self._threads:
             t.start()
-        logger_mp.info("[RecordCollectors] started (robot/tv/camera pollers)")
+        logger_mp.info(f"[RecordCollectors] started (robot/tv/camera{'/touch' if self.touch_shms else ''})")
 
     def stop_and_dump(self) -> Dict[str, Tuple[np.ndarray, list]]:
         self._stop.set()
@@ -190,6 +221,28 @@ class RecordCollectors:
             })
             time.sleep(period)
 
+    def _poll_touch(self) -> None:
+        """Inspire LEFT/RIGHT_TOUCH_SENSOR SHM polling (Phase M6 / PART3 §3).
+
+        worker_hand_dds 가 ~1kHz 로 write. 100Hz polling 으로 충분 (수집 정렬 축 50Hz).
+        SHM read_data 가 모든 field copy 라 비용 큼 — ts 만 먼저 보는 최적화는 후속.
+        """
+        period = 1.0 / 100.0
+        while not self._stop.is_set():
+            for side, shm in self.touch_shms.items():
+                try:
+                    d = shm.read_data()
+                except Exception:
+                    continue
+                ts_field = f'{side[0]}_touch_ts'  # 'l_touch_ts' or 'r_touch_ts'
+                ts = int(d.get(ts_field, 0))
+                # palm_touch 만 우선 저장 (~8x14=112 ints). 다른 finger field 도 필요 시
+                # 추가. 학습 측에서 modality.json 의 sensor.tactile 차원에 맞춰 사용.
+                key = f'{side[0]}_palm_touch'
+                payload = {'palm': d[key].copy() if key in d else np.zeros((8, 14), dtype=np.int16)}
+                self.bufs[f'touch_{side}'].append(ts, payload)
+            time.sleep(period)
+
     def _poll_camera(self) -> None:
         # Phase K7-A: 카메라별 독립 SHM (CAMERA_VIEW schema). role 별로 폴링.
         # SHM 분리로 read_data() 가 한 카메라 분량만 copy → 멀티 카메라에서도 cost 낮음.
@@ -239,6 +292,9 @@ def align_and_save_episode(
     output_hz: float = DEFAULT_OUTPUT_HZ,
     hand_type: str = 'inspire',
     camera_roles: Optional[list] = None,
+    waist_on:  bool = True,
+    head_on:   bool = True,
+    tactile_on: bool = False,
 ) -> bool:
     """Build common axis, interpolate every stream onto it, save parquet+mp4.
 
@@ -298,24 +354,59 @@ def align_and_save_episode(
         if p_c and 'right' in p_c[0]:
             camera_right_frames[role] = _zoh_pick(ts_c, p_c, 'right', ts_axis)
 
-    # ---- Save parquet (LeRobot v2.1 호환 구조 유지) ----------------------
-    # Phase K6 (P1-8): hand 종류에 따라 hand DOF 를 12 (Inspire) 또는 14 (DEX3) 로
-    # truncate. modality.json 의 left_hand/right_hand 범위 (Inspire=6+6 / DEX3=7+7)
-    # 와 정확히 일치하도록 저장. SHM 의 obs_hand/action_hand 는 항상 14D 지만,
-    # Inspire 의 경우 [:12] 만 의미가 있고 나머지 [12:14] 는 0 (worker_hand_ctrl 의
-    # zero-pad). 저장 시 hand_type 따라 분기.
-    if hand_type == 'dex3':
-        hand_dim = 14
-    else:  # inspire (default + backward-compat)
-        hand_dim = 12
+    # ---- Save parquet (Phase M / PART3 §2.3 동적 state_vec) --------------
+    # 단일 진실 출처 = modality_layout.build_state_layout. modality.json 빌드 시
+    # 사용하는 layout 과 정확히 동일한 함수를 여기서도 호출 → 차원 정합 자동.
+    # hand_dim per side: dex3=7, inspire=6. SHM obs_hand 는 항상 14D 라 Inspire 의
+    # 경우 [:6] / [6:12] 만 의미가 있고 [12:14] 는 zero pad.
+    layout = build_state_layout(hand_type, waist_on=waist_on, head_on=head_on)
+    hand_dim_side = 7 if hand_type == 'dex3' else 6
+
+    # Phase M6 (PART3 §3): tactile_on 시 left/right palm touch 를 ZOH-pick 후 axis 에
+    # 정렬. Inspire 의 LEFT/RIGHT_TOUCH_SENSOR.palm_touch (8,14) 만 우선 저장 (다른
+    # finger field 는 후속). flatten 하여 observation.sensor 1-D 컬럼에 저장.
+    # tactile_dim_per_side = 8 * 14 = 112. 양손 합 224.
+    tactile_axis: Optional[list] = None  # k 별 (224,) np.float32 또는 None
+    if tactile_on:
+        tactile_axis = []
+        ts_tl, p_tl = dumped.get('touch_left',  (np.empty(0, dtype=np.int64), []))
+        ts_tr, p_tr = dumped.get('touch_right', (np.empty(0, dtype=np.int64), []))
+        palm_l_picks = _zoh_pick(ts_tl, p_tl, 'palm', ts_axis) if ts_tl.size else [None] * n
+        palm_r_picks = _zoh_pick(ts_tr, p_tr, 'palm', ts_axis) if ts_tr.size else [None] * n
+        zero112 = np.zeros(112, dtype=np.float32)
+        for k in range(n):
+            pl = palm_l_picks[k]
+            pr = palm_r_picks[k]
+            l = np.asarray(pl, dtype=np.float32).reshape(-1) if pl is not None else zero112
+            r = np.asarray(pr, dtype=np.float32).reshape(-1) if pr is not None else zero112
+            tactile_axis.append(np.concatenate([l, r]))   # (224,)
+
     parquet_sink.start_episode(task_name, ep_idx)
-    sensor_zero = np.zeros(12, dtype=np.float32)   # 자리표 (촉각 toggle 시 확장)
+    # observation.sensor 자리표 — tactile_on 일 때만 실 데이터. off 면 zero (legacy 동일).
+    sensor_zero = np.zeros(12, dtype=np.float32)
     for k in range(n):
-        state_vec  = np.concatenate([obs_waist[k], obs_head[k], obs_arm[k],
-                                     obs_hand[k, :hand_dim]])
-        action_vec = np.concatenate([act_waist[k], act_head[k], act_arm[k],
-                                     act_hand[k, :hand_dim]])
-        parquet_sink.append(state_vec, sensor_zero, action_vec, t_sec=float(t_sec_axis[k]))
+        parts_obs = {
+            'left_arm':  obs_arm[k, :7],
+            'right_arm': obs_arm[k, 7:14],
+            'left_hand':  obs_hand[k, :hand_dim_side],
+            'right_hand': obs_hand[k, hand_dim_side:2 * hand_dim_side],
+        }
+        parts_act = {
+            'left_arm':  act_arm[k, :7],
+            'right_arm': act_arm[k, 7:14],
+            'left_hand':  act_hand[k, :hand_dim_side],
+            'right_hand': act_hand[k, hand_dim_side:2 * hand_dim_side],
+        }
+        if waist_on:
+            parts_obs['waist'] = obs_waist[k]
+            parts_act['waist'] = act_waist[k]
+        if head_on:
+            parts_obs['head'] = obs_head[k]
+            parts_act['head'] = act_head[k]
+        state_vec  = concat_state_parts(parts_obs, layout)
+        action_vec = concat_state_parts(parts_act, layout)
+        sensor_k = tactile_axis[k] if tactile_axis is not None else sensor_zero
+        parquet_sink.append(state_vec, sensor_k, action_vec, t_sec=float(t_sec_axis[k]))
 
     # raw source ts (보간 시 사용된 직전 sample 의 ts)
     def _src_ts(ts_src):
@@ -336,12 +427,22 @@ def align_and_save_episode(
             parquet_sink.add_extra_column(f'raw_ts_camera_{role}', _src_ts(dumped[key][0]))
     parquet_sink.close_episode()
 
-    # Phase K6 (P1-8): record/<task>/meta/modality.json 자동 배치 — hand 종류별 분기.
-    # 학습 측이 task-level 메타로 읽도록.
+    # Phase M (PART3 §2.2): modality.json 동적 빌드 — 토글 조합 반영.
+    # tactile_dim 은 Inspire palm 양손 합 224 (8x14x2). DEX3 는 sequence length N
+    # 확정 후 12*N 로 갱신 (REMAINING §L8).
+    tactile_dim = 224 if (tactile_on and hand_type == 'inspire') else 12
     try:
-        _ensure_meta_modality(task_name, hand_type)
+        _ensure_meta_modality(
+            task_name=task_name,
+            hand_type=hand_type,
+            waist_on=waist_on,
+            head_on=head_on,
+            tactile_on=tactile_on,
+            tactile_dim=tactile_dim,
+            camera_roles=camera_roles,
+        )
     except Exception as e:
-        logger_mp.warning(f"[Record] modality.json 배치 실패: {e}")
+        logger_mp.warning(f"[Record] modality.json 빌드 실패: {e}")
 
     # ---- Save mp4 (Phase K7-A: role 별 view 동적 저장) ------------------
     # VideoSink.start_episode 가 active view 명을 받아 동적으로 mp4 파일 생성.

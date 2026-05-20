@@ -391,11 +391,27 @@ def get_worker_specs(args, events, locks, shm_names):
 
 AFFINITY = {
     'worker_g1_ctrl':    {20, 21},
-    'WORKER_ZED':        {22},
     'WORKER_VR':         {23},
     'WORKER_HAND_R_DDS': {18},
     'WORKER_HAND_L_DDS': {19},
 }
+# Phase M5 (SUPPLEMENT §L1 보강): K7 이후 카메라 워커 이름이 'WORKER_RS_<ROLE>' /
+# 'WORKER_ZED_<ROLE>' 패턴으로 바뀌었으므로 prefix 매칭으로 처리. 동일 prefix 의 모든
+# 카메라 워커가 같은 core set 을 공유 (다중 카메라일 때 CPU 분산 시 후속 작업).
+AFFINITY_PREFIX = {
+    'WORKER_RS_':  {22},   # RealSense 카메라들 (ego/wrist_l/wrist_r)
+    'WORKER_ZED_': {22},   # ZED 카메라들
+}
+
+
+def _resolve_affinity(name: str):
+    """worker name → cpu set. 정확 매칭 우선, 그 다음 prefix 매칭."""
+    if name in AFFINITY:
+        return AFFINITY[name]
+    for prefix, cpus in AFFINITY_PREFIX.items():
+        if name.startswith(prefix):
+            return cpus
+    return None
 
 
 def launch_processes(specs):
@@ -403,7 +419,7 @@ def launch_processes(specs):
     for spec in specs:
         p = Process(target=spec['target'], args=spec['args'], daemon=True, name=spec.get('name'))
         p.start()
-        cpus = AFFINITY.get(p.name)
+        cpus = _resolve_affinity(p.name)
         if cpus:
             try:
                 os.sched_setaffinity(p.pid, cpus)

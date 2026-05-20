@@ -31,7 +31,8 @@ from sharedmemory.shmManager import SharedMemoryManager
 from sharedmemory.shm_schema import (
     RECORD_TASK_LAYOUT, RECORD_EPISODE_LAYOUT, RECORD_MODE_LAYOUT,
     WORKER_FREQ, ROBOT_ACTION, ROBOT_OBS, WORKSPACE_MASK,
-    TELEOP_CONFIG, HAND_MAPPING_INV,
+    TELEOP_CONFIG, HAND_MAPPING_INV, WAIST_MAPPING_INV, HEAD_MAPPING_INV,
+    TACTILE_MAPPING_INV,
     TELEVISION, QUEST_CONTROLLER,
 )
 
@@ -90,15 +91,49 @@ def worker_record(shared_event, shm_name, shared_lock):
     active_camera_roles = list(role_to_shm.keys())
     logger_mp.info(f"[Record] active camera roles: {active_camera_roles}")
 
-    # ── hand_type (TELEOP_CONFIG SHM 의 1회 기록 값). camera 는 role_to_shm 기반.
-    hand_type_str   = "inspire"
+    # Phase M6 (PART3 §3): Inspire LEFT/RIGHT_TOUCH SHM attach — 항상 attach 시도하되,
+    # tactile_on 일 때만 RecordCollectors 에 전달 (off 시 polling 안 함 = 100% legacy 동일).
+    from sharedmemory.shm_schema import LEFT_TOUCH_SENSOR_LAYOUT, RIGHT_TOUCH_SENSOR_LAYOUT
+    touch_shms_attached = {}
+    try:
+        if 'left_touch_shm' in shm_name:
+            touch_shms_attached['left']  = attach('left_touch_shm',  LEFT_TOUCH_SENSOR_LAYOUT,  'left_touch_lock')
+        if 'right_touch_shm' in shm_name:
+            touch_shms_attached['right'] = attach('right_touch_shm', RIGHT_TOUCH_SENSOR_LAYOUT, 'right_touch_lock')
+    except Exception as e:
+        logger_mp.warning(f"[Record] touch SHM attach 실패: {e}")
+
+    # ── TELEOP_CONFIG → 모달리티 토글 추출 (Phase M3, PART3 §2.4)
+    # 토글 규칙 (PART3 §2.4):
+    #   --waist fixed → waist_on=False (데이터에서 waist 제외)
+    #   --waist hmd   → waist_on=True
+    #   --head off    → head_on=False
+    #   --head dxl    → head_on=True
+    #   --tactile off → tactile_on=False
+    #   --tactile on  → tactile_on=True
+    #   --hand        → hand_type
+    # 끄고 수집한 모달리티는 modality.json + parquet state_vec 양쪽에서 동시에 제외
+    # → "수집=학습=배포 자동 일치" (PART3 §0.3 미구현 항목 해소).
+    hand_type_str = "inspire"
+    waist_on = True
+    head_on  = True
+    tactile_on = False
     if teleop_config_shm is not None:
         try:
             cfg = teleop_config_shm.read_data()
             hand_type_str = HAND_MAPPING_INV.get(int(cfg["hand_type"].item()), "inspire")
+            waist_mode    = WAIST_MAPPING_INV.get(int(cfg["waist_mode"].item()), "hmd")
+            head_mode     = HEAD_MAPPING_INV.get(int(cfg["head_mode"].item()), "dxl")
+            tactile_mode  = TACTILE_MAPPING_INV.get(int(cfg["tactile_mode"].item()), "off")
+            waist_on   = (waist_mode  == 'hmd')
+            head_on    = (head_mode   == 'dxl')
+            tactile_on = (tactile_mode == 'on')
         except Exception as e:
             logger_mp.warning(f"[Record] teleop_config 읽기 실패: {e}")
-    logger_mp.info(f"[Record] hand_type={hand_type_str}")
+    logger_mp.info(
+        f"[Record] hand_type={hand_type_str} "
+        f"waist_on={waist_on} head_on={head_on} tactile_on={tactile_on}"
+    )
 
     # ── 외부 루프 주파수 (FSM 폴링용 — 데이터 수집 thread 는 collectors 가 별도 thread 로 처리)
     outer_hz = 20.0
@@ -126,7 +161,9 @@ def worker_record(shared_event, shm_name, shared_lock):
                 'television':   television_shm,
                 'controller':   controller_shm,
             },
-            camera_shms=role_to_shm,  # Phase K7-A: role → SHM dict
+            camera_shms=role_to_shm,                  # Phase K7-A: role → SHM dict
+            touch_shms=(touch_shms_attached           # Phase M6: tactile_on 시에만 전달
+                        if tactile_on else None),
         )
         collectors.start()
 
@@ -144,8 +181,12 @@ def worker_record(shared_event, shm_name, shared_lock):
             task_name=task_name,
             ep_idx=this_ep_idx,
             output_hz=DEFAULT_OUTPUT_HZ,
-            hand_type=hand_type_str,        # Phase K6: hand 종류별 hand DOF truncation
-            camera_roles=active_camera_roles,  # Phase K7-A: role 리스트
+            hand_type=hand_type_str,
+            camera_roles=active_camera_roles,
+            # Phase M3 (PART3 §2.4): 토글 전달 → 동적 modality + state_vec.
+            waist_on=waist_on,
+            head_on=head_on,
+            tactile_on=tactile_on,
         )
 
     def _stop_collectors_discard() -> None:

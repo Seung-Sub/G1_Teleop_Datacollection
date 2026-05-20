@@ -69,6 +69,18 @@ USB2.x 가 잡히면 worker 가 `USB2.x detected — 3대 동시 grab 시 대역
 - 카메라 3대를 PC 의 서로 다른 USB3 root hub 에 분산 연결 (lsusb -t 로 트리 확인)
 - 또는 D405 의 fps 를 30 → 15 로 낮춤 (utils/cameras.yaml 에 fps:15 추가 + worker_camera 에서 사용 로직 추가 — 현재 코드는 30 고정, 후속 작업)
 
+### L1-D. AFFINITY 키 패턴 매칭 (SUPPLEMENT 보강)
+
+> Phase M5 (commit 후) 적용 — main.py 의 AFFINITY 키가 K7 이전 워커 이름 (`'WORKER_ZED'`)
+> 으로 남아있어 K7 이후 카메라 워커 (`WORKER_RS_EGO`, `WORKER_RS_WRIST_L`, `WORKER_ZED_EGO`)
+> 와 매칭 안 됨. 동작은 하지만 CPU 코어 격리 상실 → 코어 경합 가능성.
+
+**확인**: 실 운용 중 `htop` 로 카메라 워커가 의도한 코어에 묶이는지. 안 묶이면:
+- 코드: M5 (PART3 §L1 보강) 가 prefix 매칭으로 갱신함.
+- 머신 별 코어 수에 맞춰 AFFINITY 의 CPU 번호 (현재 18~23 하드코딩) 조정.
+
+**트리거**: 멀티카메라 jitter (§L1-B) 가 큰데 USB 는 정상일 때 — 코어 경합이 원인 가능성.
+
 ### L1-B. 프레임 드롭 + jitter 측정
 
 **확인 방법**: 한 에피소드 (10~30s) 녹화 후 parquet 의 `raw_ts_camera_<role>` 컬럼
@@ -237,27 +249,48 @@ field 명 mismatch 면 `LEFT/RIGHT_TOUCH_SENSOR_LAYOUT` 수정 필요.
 
 ## L6. 데이터 수집 → 학습 → 배포 일관성
 
-### L6-A. modality.json head 일관성 (Part 2 §11 권고)
+### L6-A. 모달리티 토글 일관성 (PART3 §1 + §2 로 일반화됨 — SUPPLEMENT 보강)
 
-**중대 사항**: 현재 `utils/parquet/modality_{inspire,dex3}.json` 에 **state.head 가
-없다**. 그러나 `utils/record_collectors.align_and_save_episode` 는 obs_head 를
-state_vec 에 포함해 저장 → 실제 parquet state_vec 의 layout 이 modality.json 의
-선언과 어긋남.
+> 초판 (이 섹션) 은 "head 단건" 문제로 적었으나 분석자의 SUPPLEMENT 보강과 PART3 개정판이
+> 더 일반적인 **waist / head / tactile 공통 토글 일관성** 으로 재정의. 이 항목은 Phase M
+> (commit 후) 의 §M1~M4 로 해소된다. 본 섹션은 회귀 검증 매트릭스만 남김.
 
-**확정 필요한 정책 (사용자 결정 사항)**:
-- (a) state.head 를 modality.json 에 추가 (start=3, end=5, 나머지 인덱스 +2 shift)
-- (b) align_and_save_episode 의 state_vec 에서 head 를 빼기 (학습 시 head 사용 안 함)
+**Phase M 이전 상태 (검증된 사실)**:
+- `modality_dex3.json` (33D), `modality_inspire.json` (31D) 모두 **state.head 포함**.
+- `align_and_save_episode` 의 state_vec 는 항상 `[obs_waist, obs_head, obs_arm, obs_hand]`
+  concat — **head 항상 포함** ✓ (modality 와 일치).
+- `worker_deploy_policy._split_qpos` 는 `qpos[3:5]` (head) **의도적으로 버림** → modality 와
+  **차원 불일치** (정책 입력이 학습 데이터와 다른 차원).
+- waist_mode / head_mode / tactile_mode 는 TELEOP_CONFIG 에 기록만 되고 저장/배포 레이아웃
+  미반영.
 
-**검증 후 즉시 적용**:
+**Phase M (PART3 적용) 후**:
+- `utils/modality_layout.py` 가 단일 진실 출처. modality 빌드 + state_vec concat + deploy
+  분할 모두 동일 함수에서 layout 결정.
+- `--waist fixed` → 데이터에서 waist 제외 / `--waist hmd` → 포함.
+- `--head off` → 데이터에서 head 제외 / `--head dxl` → 포함.
+- `--tactile off` → observation.sensor 제외 / `--tactile on` → 포함.
+- deploy 가 record/<task>/meta/modality.json 을 로드해 obs_dict 키/차원 자동 결정.
+
+**회귀 검증 매트릭스** (각 조합 1 에피소드 수집 후):
 ```python
 df = pd.read_parquet('record/<task>/data/chunk-000/episode_000000.parquet')
 print(f'state_vec dim: {len(df["observation.state"].iloc[0])}')
-# DEX3 + head 포함 = 35D, head 미포함 = 33D
-# modality_dex3.json 의 right_hand.end = 33 → head 미포함 일치하려면 align_and_save 변경
+import json
+m = json.load(open('record/<task>/meta/modality.json'))
+max_end = max(v['end'] for v in m['state'].values())
+print(f'modality max end: {max_end}')
+assert len(df["observation.state"].iloc[0]) == max_end, 'state_vec / modality 불일치'
 ```
 
-deploy 측 `_split_qpos` 가 이미 head 를 의도적으로 버린다는 주석 (worker_deploy_policy.py:
-83-93) 이 있으므로, 일관성 위해 **수집 측에서도 head 를 빼는 (b) 안 권장**.
+조합:
+| waist | head | hand    | tactile | 기대 state dim |
+|-------|------|---------|---------|----------------|
+| fixed | off  | inspire | off     | 14 (arm14 + hand12 → 26)... 정확한 값은 modality 결과에서 확인 |
+| hmd   | dxl  | dex3    | off     | 33 (waist3 + head2 + arm14 + hand14) |
+| ...   | ...  | ...     | ...     | ... |
+
+(테이블 값은 modality_layout.py 의 build_state_layout 결과로 정확히 산출.)
 
 ### L6-B. GR00T DataConfig 등록
 
@@ -350,9 +383,27 @@ print('deploy frame mean:', deploy_rgb.mean(axis=(0,1)))
 
 ---
 
-## L8. K8 촉각 (DEX3 press_sensor_state)
+## L8. 촉각 (Inspire 먼저, DEX3 는 N 확정 후 — SUPPLEMENT 보강)
 
-### L8-A. sequence length 실측
+### L8-pre. Inspire FTP tactile 토글 데이터 경로 (PART3 §3)
+
+> 분석자 SUPPLEMENT 보강 채택: **Inspire 의 LEFT/RIGHT_TOUCH_SENSOR_LAYOUT 은 이미 차원
+> 확정** → Phase M 토글 메커니즘에 먼저 연동. Inspire 가 토글 일관성 레퍼런스 구현이 됨.
+
+Phase M6 (commit 후) 적용 — `--hand inspire --tactile on` 시 record_collectors 가 touch
+buffer 수집 + parquet `observation.sensor` 컬럼에 저장. `--tactile off` 일 때 100% 불변
+(zero placeholder 유지).
+
+검증:
+```python
+df = pd.read_parquet('record/<task>/data/chunk-000/episode_000000.parquet')
+# --tactile on 일 때
+sensor = df['observation.sensor'].iloc[0]
+print(f'sensor dim: {len(sensor)}, all-zero? {all(v==0 for v in sensor)}')
+# off → 12-D zero, on → 실제 touch 값
+```
+
+### L8-A. DEX3 press_sensor_state sequence length 실측
 
 `--tactile on` 으로 main.py 실행 후 첫 second 안에 다음 로그 1회 출력:
 ```
@@ -410,6 +461,8 @@ print('state shape:', z['data/state'].shape)  # (T, 33) 이면 OK, (T, 31) 이�
 | **wrist pose 학습 입력 저장 시 SLERP** | tv_wrapper.py 의 TODO 주석 참조. utils.mat_tool.se3_interp 호출만 추가 (이미 구현). |
 | **pro4000 ↔ 로컬 머신 sync** | rsync 또는 git pull (Seung-Sub/G1_Teleop_Datacollection main 기준). pro4000 의 `~/G1_Teleoperation_clean` 의 old history 와 충돌 가능 — git reset --hard origin/main 필요. |
 | **KISTAR zip 54MB** | GitHub push 시 warning. `git filter-branch` 로 history 정리 가능. 사용자 결정 필요. |
+| **modality 정적 파일 → template (SUPPLEMENT 보강)** | Phase M 동적 빌드 도입 후, 기존 `utils/parquet/modality_{inspire,dex3}.json` 은 (a) 기본 템플릿 reference 로만 (확장자 `.template.json`) 또는 (b) 제거. 동적 빌드 결과가 record/<task>/meta/modality.json 의 정본. 두 파일 공존 시 어느 게 진짜인지 혼란. Phase M2 에서 `.template.json` 으로 개명. |
+| **data_refinement convert_to_{dp,act} (§L9 와 연계)** | hand DOF 12 하드코딩 가능성. 동적 modality (가변 state 차원) 도입 후, modality.json 의 max end 를 읽어 state 차원 결정하도록 변경. |
 
 ---
 
