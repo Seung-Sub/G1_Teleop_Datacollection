@@ -14,11 +14,25 @@ from utils.rate import Rate
 import logging_mp
 logger_mp = logging_mp.get_logger(__name__)
 
-kTopicLowCommand = "rt/lowcmd"
-kTopicLowState = "rt/lowstate"
+kTopicLowCommand       = "rt/lowcmd"     # Phase N: hoist 모드 (전체 35 motor 직접 제어)
+kTopicLowCommand_Motion = "rt/arm_sdk"   # Phase N: loco 모드 (motion mode, arm 14 + weight)
+kTopicLowState         = "rt/lowstate"
 G1_29_Num_Motors = 35
 G1_23_Num_Motors = 35
 H1_2_Num_Motors = 35
+
+# Phase N (PART4 §0.1, xr_teleoperate robot_arm.py 검증 값):
+# kp/kd 게인 — motion mode init 시 관절 종류별 차등 적용.
+_MOTION_KP_HIGH = 300.0   # leg/waist 기본 (강한 모터)
+_MOTION_KD_HIGH = 3.0
+_MOTION_KP_LOW  = 80.0    # weak motor (ankle pitch, shoulder, elbow) + arm 기본
+_MOTION_KD_LOW  = 3.0
+_MOTION_KP_WRIST = 40.0   # wrist roll/pitch/yaw
+_MOTION_KD_WRIST = 1.5
+
+# arm_sdk weight bit motor index. G1_29 의 not-used joint 0 = motor id 29.
+# motor_cmd[29].q 가 motion controller 의 arm_sdk weight 신호로 해석됨 (0..1).
+_ARM_SDK_WEIGHT_MOTOR_ID = 29
  
 
 class MotorState:
@@ -36,6 +50,12 @@ class G1_29_LowState:
         self.recv_ts = 0      # host perf_counter_ns at Read() 직후
         self.robot_tick = 0   # msg.tick 그대로 (robot-internal)
 
+class _ContextNop:
+    """no-op context manager — ctrl_lock 이 아직 생성되기 전 _init_motion_mode_lock 에서 사용."""
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+
+
 class DataBuffer:
     def __init__(self):
         self.data = None
@@ -50,10 +70,25 @@ class DataBuffer:
             self.data = data
 
 class G1_29_ArmController:
-    def __init__(self, mode):
-        logger_mp.info("Initialize G1_29_ArmController...")
+    def __init__(self, mode, lower_body='hoist'):
+        """G1 본체 제어 컨트롤러.
+
+        Args:
+            mode: 'teleop' / 'gr00t' / 'gr00t_zed' — kp/kd/default_dof_pos 프로파일
+                  (g1_control/joint_setting.yaml).
+            lower_body: 'hoist' (default) 또는 'loco' (Phase N).
+                'hoist' = rt/lowcmd, 35 모터 전체 직접 제어. 호이스트로 매달았거나
+                          다리 안 쓰는 환경 전용 (사용자 운용).
+                'loco'  = rt/arm_sdk, motion mode. 상체 (arm 14) 만 명령하고 하체
+                          (leg/waist) 는 motion controller (내장 LocoClient/SDK) 가
+                          밸런싱 + 보행 처리. arm_sdk weight (motor_cmd[29].q) 가
+                          0→1 ramp 후 arm 명령 활성.
+        """
+        logger_mp.info(f"Initialize G1_29_ArmController (lower_body={lower_body})...")
 
         self.mode = mode
+        self.lower_body = lower_body
+        self._arm_sdk_weight = 0.0   # loco 모드 — engage_arm_sdk 가 0→1 ramp
         self.remote = RemoteController()
 
         with open("g1_control/joint_setting.yaml", "r", encoding="utf-8") as f:
@@ -90,8 +125,10 @@ class G1_29_ArmController:
         # initialize lowcmd publisher and lowstate subscriber
         cfg = yaml.safe_load(open("utils/lan_config.yaml"))
         ChannelFactoryInitialize(0, cfg["network_interface"])
-        
-        self.lowcmd_publisher = ChannelPublisher(kTopicLowCommand, LowCmd_)
+
+        # Phase N: 토픽 분기. lowcmd = hoist (직접 제어) / arm_sdk = loco (motion mode).
+        _pub_topic = kTopicLowCommand_Motion if self.lower_body == 'loco' else kTopicLowCommand
+        self.lowcmd_publisher = ChannelPublisher(_pub_topic, LowCmd_)
         self.lowcmd_publisher.Init()
         self.lowstate_subscriber = ChannelSubscriber(kTopicLowState, LowState_)
         self.lowstate_subscriber.Init()
@@ -114,9 +151,16 @@ class G1_29_ArmController:
         self.msg.mode_machine = self.get_mode_machine()
 
 
-        self.zero_torque_state()
-        self.move_to_default_pos()
-        self.default_pos_state()
+        # Phase N: init 시퀀스 분기.
+        # hoist: 기존 zero_torque → move_to_default → default_pos_state (물리 리모컨 start/A 대기)
+        # loco : 팔 빼고 현재 q 로 잠금 + kp/kd 차등. motion controller 가 leg/waist 제어.
+        #        zero_torque/move_to_default 호출 안 함 (motion controller 와 충돌 위험).
+        if self.lower_body == 'loco':
+            self._init_motion_mode_lock()
+        else:
+            self.zero_torque_state()
+            self.move_to_default_pos()
+            self.default_pos_state()
 
 
         self.publish_thread = threading.Thread(target=self._ctrl_motor_state)
@@ -124,7 +168,7 @@ class G1_29_ArmController:
         self.publish_thread.daemon = True
         self.publish_thread.start()
 
-        logger_mp.info("Initialize G1_29_ArmController OK!\n")
+        logger_mp.info(f"Initialize G1_29_ArmController OK (lower_body={self.lower_body})!\n")
 
 #----------------------------------------------------------------------------------------------------------------------------------------------------------------------------#
     def _subscribe_motor_state(self):
@@ -182,6 +226,108 @@ class G1_29_ArmController:
         motion_scale = np.max(np.abs(delta)) / (velocity_limit * self.control_dt)
         cliped_arm_q_target = current_q + delta / max(motion_scale, 1.0)
         return cliped_arm_q_target
+
+    # ----- Phase N: motion mode helpers -----------------------------------
+    @staticmethod
+    def _is_weak_motor(motor_id_int: int) -> bool:
+        """xr_teleoperate robot_arm.py 의 weak_motors 와 동일.
+        weak = ankle pitch × 2 + shoulder × 6 + elbow × 2 = 8 모터.
+        """
+        return motor_id_int in {
+            G1_29_JointIndex.kLeftAnklePitch.value,
+            G1_29_JointIndex.kRightAnklePitch.value,
+            G1_29_JointIndex.kLeftShoulderPitch.value,
+            G1_29_JointIndex.kLeftShoulderRoll.value,
+            G1_29_JointIndex.kLeftShoulderYaw.value,
+            G1_29_JointIndex.kLeftElbow.value,
+            G1_29_JointIndex.kRightShoulderPitch.value,
+            G1_29_JointIndex.kRightShoulderRoll.value,
+            G1_29_JointIndex.kRightShoulderYaw.value,
+            G1_29_JointIndex.kRightElbow.value,
+        }
+
+    @staticmethod
+    def _is_wrist_motor(motor_id_int: int) -> bool:
+        """wrist roll/pitch/yaw 양팔 = 6 모터."""
+        return motor_id_int in {
+            G1_29_JointIndex.kLeftWristRoll.value,
+            G1_29_JointIndex.kLeftWristPitch.value,
+            G1_29_JointIndex.kLeftWristyaw.value,
+            G1_29_JointIndex.kRightWristRoll.value,
+            G1_29_JointIndex.kRightWristPitch.value,
+            G1_29_JointIndex.kRightWristYaw.value,
+        }
+
+    def _init_motion_mode_lock(self):
+        """loco 모드 init — 팔 빼고 전부 현재 q 로 잠금 + kp/kd 차등.
+        (xr_teleoperate robot_arm.py:108-131 방식 그대로 이식.)
+
+        motion controller 가 leg/waist 를 제어하므로 zero_torque/move_to_default
+        호출하지 않는다. 잠금 q 는 lowstate 구독으로 받은 현재값.
+        """
+        # lowstate 구독 thread 가 이미 시작됐고 첫 메시지 도착 후. all_motor_q 캐시.
+        all_q = self.get_current_motor_q()
+        if all_q is None:
+            logger_mp.error("[G1_29_ArmController] _init_motion_mode_lock: lowstate 미수신 — abort")
+            return
+
+        arm_ids = {i.value for i in G1_29_JointArmIndex}
+        for jid in G1_29_JointIndex:
+            self.msg.motor_cmd[jid].mode = 1
+            if jid.value in arm_ids:
+                if self._is_wrist_motor(jid.value):
+                    kp, kd = _MOTION_KP_WRIST, _MOTION_KD_WRIST
+                else:
+                    kp, kd = _MOTION_KP_LOW, _MOTION_KD_LOW
+            else:
+                if self._is_weak_motor(jid.value):
+                    kp, kd = _MOTION_KP_LOW, _MOTION_KD_LOW
+                else:
+                    kp, kd = _MOTION_KP_HIGH, _MOTION_KD_HIGH
+            self.msg.motor_cmd[jid].kp = float(kp)
+            self.msg.motor_cmd[jid].kd = float(kd)
+            self.msg.motor_cmd[jid].q  = float(all_q[jid.value])
+            self.msg.motor_cmd[jid].dq = 0.0
+            self.msg.motor_cmd[jid].tau = 0.0
+        # arm_sdk weight bit motor — init 시 0 (engage_arm_sdk 가 1 로 ramp).
+        self.msg.motor_cmd[_ARM_SDK_WEIGHT_MOTOR_ID].q = 0.0
+        # 초기 arm_q_target 도 현재 arm q 로 (engage_arm_sdk ramp 동안 급가속 방지).
+        with self.ctrl_lock if hasattr(self, 'ctrl_lock') else _ContextNop():
+            self.arm_q_target = np.asarray(
+                [all_q[jid.value] for jid in G1_29_JointArmIndex], dtype=np.float32
+            )
+        logger_mp.info("[G1_29_ArmController] motion mode init lock OK")
+
+    def engage_arm_sdk(self, ramp_sec: float = 2.0):
+        """loco 전용 — arm_sdk weight 0→1 점진 (안전).
+
+        xr_teleoperate 는 1.0 직접 설정 (clip_arm_q_target 이 막아준다는 가정) 이나
+        공식 문서는 점진 권장. 우리는 안전하게 점진.
+        ramp 동안 arm_q_target = 현재 arm q (외부에서 갱신 안 되도록 호출자 책임).
+        """
+        if self.lower_body != 'loco':
+            return
+        steps = max(1, int(ramp_sec / 0.02))
+        for i in range(steps + 1):
+            w = float(i) / steps
+            self._arm_sdk_weight = w
+            time.sleep(0.02)
+        logger_mp.info("[G1_29_ArmController] arm_sdk engaged (weight=1.0)")
+
+    def disengage_arm_sdk(self, ramp_sec: float = 2.0):
+        """loco 전용 — arm_sdk weight 1→0 점진. 종료 시 호출.
+
+        xr_teleoperate ctrl_dual_arm_go_home 의 종료 ramp 와 동일 패턴 (np.linspace(1,0,101)
+        + sleep(0.02) → 2.02 초).
+        """
+        if self.lower_body != 'loco':
+            return
+        steps = max(1, int(ramp_sec / 0.02))
+        for i in range(steps + 1):
+            w = 1.0 - float(i) / steps
+            self._arm_sdk_weight = w
+            time.sleep(0.02)
+        logger_mp.info("[G1_29_ArmController] arm_sdk disengaged (weight=0.0)")
     
     def _ctrl_motor_state(self):
         while not self._stop_event.is_set():
@@ -197,25 +343,38 @@ class G1_29_ArmController:
                 arm_q_target     = self.arm_q_target
                 arm_tauff_target = self.arm_tauff_target
 
-            cliped_leg_q_target = self.clip_leg_q_target(leg_q_target, velocity_limit = self.leg_velocity_limit)
-            cliped_waist_q_target = self.clip_waist_q_target(waist_q_target, velocity_limit = self.waist_velocity_limit)
+            # Phase N: loco 모드는 arm 14 + arm_sdk weight 만 갱신. leg/waist 는
+            # _init_motion_mode_lock 의 잠금값 유지 (motion controller 가 실제 제어).
             cliped_arm_q_target = self.clip_arm_q_target(arm_q_target, velocity_limit = self.arm_velocity_limit)
 
-            for idx, id in enumerate(G1_29_JointLegIndex):
-                # self.msg.motor_cmd[id].q = cliped_leg_q_target[idx]
-                self.msg.motor_cmd[id].q = leg_q_target[idx]
-                self.msg.motor_cmd[id].dq = 0
-                self.msg.motor_cmd[id].tau = leg_tauff_target[idx]      
+            if self.lower_body == 'loco':
+                for idx, id in enumerate(G1_29_JointArmIndex):
+                    self.msg.motor_cmd[id].q = cliped_arm_q_target[idx]
+                    self.msg.motor_cmd[id].dq = 0
+                    self.msg.motor_cmd[id].tau = arm_tauff_target[idx]
+                # arm_sdk weight bit (motor 29). 0=disengaged → motion controller 만 동작,
+                # 1=engaged → arm 명령 따라감. engage_arm_sdk 가 0→1 ramp 적용.
+                self.msg.motor_cmd[_ARM_SDK_WEIGHT_MOTOR_ID].q = float(self._arm_sdk_weight)
+            else:
+                # hoist (기존 동작 100% 보존): leg+waist+arm 전체 발행.
+                cliped_leg_q_target = self.clip_leg_q_target(leg_q_target, velocity_limit = self.leg_velocity_limit)
+                cliped_waist_q_target = self.clip_waist_q_target(waist_q_target, velocity_limit = self.waist_velocity_limit)
 
-            for idx, id in enumerate(G1_29_JointWaistIndex):
-                self.msg.motor_cmd[id].q = cliped_waist_q_target[idx]
-                self.msg.motor_cmd[id].dq = 0
-                self.msg.motor_cmd[id].tau = waist_tauff_target[idx]      
+                for idx, id in enumerate(G1_29_JointLegIndex):
+                    # self.msg.motor_cmd[id].q = cliped_leg_q_target[idx]
+                    self.msg.motor_cmd[id].q = leg_q_target[idx]
+                    self.msg.motor_cmd[id].dq = 0
+                    self.msg.motor_cmd[id].tau = leg_tauff_target[idx]
 
-            for idx, id in enumerate(G1_29_JointArmIndex):
-                self.msg.motor_cmd[id].q = cliped_arm_q_target[idx]
-                self.msg.motor_cmd[id].dq = 0
-                self.msg.motor_cmd[id].tau = arm_tauff_target[idx]      
+                for idx, id in enumerate(G1_29_JointWaistIndex):
+                    self.msg.motor_cmd[id].q = cliped_waist_q_target[idx]
+                    self.msg.motor_cmd[id].dq = 0
+                    self.msg.motor_cmd[id].tau = waist_tauff_target[idx]
+
+                for idx, id in enumerate(G1_29_JointArmIndex):
+                    self.msg.motor_cmd[id].q = cliped_arm_q_target[idx]
+                    self.msg.motor_cmd[id].dq = 0
+                    self.msg.motor_cmd[id].tau = arm_tauff_target[idx]
 
             self.msg.crc = self.crc.Crc(self.msg)
             self.lowcmd_publisher.Write(self.msg)
@@ -556,10 +715,11 @@ class G1_29_JointIndex(IntEnum):
     kRightWristPitch = 27
     kRightWristYaw = 28
     
-    # # not used
-    # kNotUsedJoint0 = 29
-    # kNotUsedJoint1 = 30
-    # kNotUsedJoint2 = 31
-    # kNotUsedJoint3 = 32
-    # kNotUsedJoint4 = 33
-    # kNotUsedJoint5 = 34
+    # Phase N: kNotUsedJoint0 (motor id 29) = arm_sdk weight bit (motion mode 전용).
+    # 나머지 30~34 는 G1_29 에서 사용 안 함 (다른 G1 변종에서 사용 가능).
+    kNotUsedJoint0 = 29
+    kNotUsedJoint1 = 30
+    kNotUsedJoint2 = 31
+    kNotUsedJoint3 = 32
+    kNotUsedJoint4 = 33
+    kNotUsedJoint5 = 34

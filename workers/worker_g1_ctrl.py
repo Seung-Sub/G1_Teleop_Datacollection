@@ -30,13 +30,14 @@ class G1CtrlWorker(DualRateWorker):
     느린 루프(ACT_HZ): RUN 상태에서만 액션 읽고 실제 제어 수행
     상태 전이/초기화도 느린 루프에서 처리
     """
-    def __init__(self, shared_event, shm_name, shared_lock, mode, head_mode='dxl'):
+    def __init__(self, shared_event, shm_name, shared_lock, mode, head_mode='dxl', lower_body='hoist'):
         super().__init__(slow_hz=ACT_HZ, fast_hz=OBS_HZ)
 
         # 외부 이벤트
         self._shared_event = shared_event
         self.mode = mode
-        self.head_mode = head_mode  # 'dxl' | 'off'
+        self.head_mode = head_mode    # 'dxl' | 'off'
+        self.lower_body = lower_body  # 'hoist' | 'loco' (Phase N)
 
         # ── SHM ───────────────────────────────────────────
         self.freq_shm         = SharedMemoryManager(WORKER_FREQ,        shared_lock["freq_lock"],         shm_name["freq_shm"])
@@ -95,9 +96,14 @@ class G1CtrlWorker(DualRateWorker):
         # --- WAIT_CONNECT: 초기화 트리거 ---
         if self.state is State.WAIT_CONNECT:
             if self._shared_event['set_g1'].is_set() and not self.g1_initialized:
-                logger_mp.info(f"[G1_Ctrl] Initializing G1{'+DXL' if self.head_mode=='dxl' else ' (head=off)'}...")
+                logger_mp.info(
+                    f"[G1_Ctrl] Initializing G1 (lower_body={self.lower_body}"
+                    f"{', DXL' if self.head_mode=='dxl' else ', head=off'})..."
+                )
                 try:
-                    self.g1_ctrl = G1_29_ArmController(self.mode)
+                    # Phase N: lower_body 전달. loco 면 G1_29_ArmController 가 rt/arm_sdk
+                    # publisher + motion mode init lock (zero_torque/move_to_default 건너뜀).
+                    self.g1_ctrl = G1_29_ArmController(self.mode, lower_body=self.lower_body)
                     if self.head_mode == 'dxl':
                         self.d_ctrl = Dynamixel_Controller()
                     else:
@@ -105,8 +111,13 @@ class G1CtrlWorker(DualRateWorker):
                         logger_mp.info("[G1_Ctrl] head_mode=off — Dynamixel skipped.")
 
                     self.g1_ctrl.speed_gradual_max()
+                    # loco 모드: arm_sdk weight 0→1 ramp (2s). engage 동안 publish thread
+                    # 가 weight 를 매 cycle 반영. ramp 전 arm_q_target = 현재 arm q (init
+                    # 안에서 이미 설정됨 — 급가속 방지).
+                    if self.lower_body == 'loco':
+                        self.g1_ctrl.engage_arm_sdk(ramp_sec=2.0)
                     self.g1_initialized = True
-                    logger_mp.info("[G1_Ctrl] G1 initialized.")
+                    logger_mp.info(f"[G1_Ctrl] G1 initialized (lower_body={self.lower_body}).")
                 except Exception as e:
                     logger_mp.exception("[G1_Ctrl] G1 init failed: %s", e)
                     self._shared_event['emergency'].set()
@@ -128,23 +139,32 @@ class G1CtrlWorker(DualRateWorker):
 
             # 액션 읽기
             action = self.robot_action_shm.read_data()
-            
+
             action_leg         = action["action_leg"]
             action_waist       = action["action_waist"]
             action_waist_tauff = action["action_waist_tauff"]
             action_head        = action["action_head"]
             action_arm         = action["action_arm"]
             action_arm_tauff   = action["action_arm_tauff"]
-            # 제어 입력
-            self.g1_ctrl.ctrl_leg(action_leg)
-            self.g1_ctrl.ctrl_waist(action_waist, action_waist_tauff)
 
-            # 머리 제어 (Dynamixel) — head_mode='off' 면 d_ctrl=None 으로 skip
-            if self.d_ctrl is not None:
-                d_tick = np.array([self.d_ctrl.rad_to_dxl_tick(x) for x in action_head], dtype=int)
-                self.d_ctrl.ctrl_dynamixel(d_tick)
+            # Phase N: loco 모드는 leg/waist 명령을 보내지 않는다. motion controller 가
+            # 하체를 제어 중이므로 충돌 방지. arm + head 만 갱신.
+            if self.lower_body == 'loco':
+                # head 는 Dynamixel 별도 채널 (motion controller 영향 없음) — 그대로.
+                if self.d_ctrl is not None:
+                    d_tick = np.array([self.d_ctrl.rad_to_dxl_tick(x) for x in action_head], dtype=int)
+                    self.d_ctrl.ctrl_dynamixel(d_tick)
+                self.g1_ctrl.ctrl_arm(action_arm, action_arm_tauff)
+            else:
+                # hoist (기존 동작 100% 보존)
+                self.g1_ctrl.ctrl_leg(action_leg)
+                self.g1_ctrl.ctrl_waist(action_waist, action_waist_tauff)
 
-            self.g1_ctrl.ctrl_arm(action_arm, action_arm_tauff)
+                if self.d_ctrl is not None:
+                    d_tick = np.array([self.d_ctrl.rad_to_dxl_tick(x) for x in action_head], dtype=int)
+                    self.d_ctrl.ctrl_dynamixel(d_tick)
+
+                self.g1_ctrl.ctrl_arm(action_arm, action_arm_tauff)
 
 
     # 빠른 루프: RUN에서만 관측(250 Hz) → SHM 기록 (+옵션: 주파수 측정)
@@ -189,6 +209,12 @@ class G1CtrlWorker(DualRateWorker):
     def stop(self) -> None:
         super().stop()
         try:
+            # Phase N: loco 면 종료 전 arm_sdk weight 1→0 점진 해제 (안전).
+            if self.g1_ctrl is not None and self.lower_body == 'loco':
+                try:
+                    self.g1_ctrl.disengage_arm_sdk(ramp_sec=2.0)
+                except Exception as e:
+                    logger_mp.warning(f"[G1_Ctrl] disengage_arm_sdk 실패: {e}")
             if self.d_ctrl is not None:
                 self.d_ctrl.disconnect_dynamixel()
             if self.g1_ctrl is not None:
@@ -202,8 +228,9 @@ class G1CtrlWorker(DualRateWorker):
 
 
 # ────────────── 실행 진입점 예시 ──────────────
-def worker_g1_ctrl(shared_event, shm_name, shared_lock, mode, head_mode='dxl'):
-    w = G1CtrlWorker(shared_event, shm_name, shared_lock, mode, head_mode=head_mode)
+def worker_g1_ctrl(shared_event, shm_name, shared_lock, mode, head_mode='dxl', lower_body='hoist'):
+    w = G1CtrlWorker(shared_event, shm_name, shared_lock, mode,
+                     head_mode=head_mode, lower_body=lower_body)
     try:
         w.start()
         while not shared_event['shutdown'].is_set():

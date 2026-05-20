@@ -31,6 +31,7 @@ from sharedmemory.shm_schema import (
     WORKER_FREQ, GR00T_TASK_LAYOUT, ROBOT_OBS, ROBOT_ACTION,
     MASK_CONTROL_LAYOUT, DEPTH_MAP, TELEOP_CONFIG, QUEST_CONTROLLER,
     HAND_MAPPING, CAMERA_MAPPING, VR_INPUT_MAPPING, WAIST_MAPPING, HEAD_MAPPING, TACTILE_MAPPING,
+    LOWER_BODY_MAPPING,
 )
 # NOTE: worker_vr / television / Vuer imports are deferred into
 # get_worker_specs() because the params-proto library (a Vuer
@@ -158,6 +159,21 @@ def parse_args():
                         help="DEX3 압력센서 (HandState_.press_sensor_state): 'off' = 미사용 (default), "
                              "'on' = subscribe thread 가 메시지의 press_sensor_state.length 를 로깅. "
                              "실 device 의 sequence length 확정 후 SHM/parquet 컬럼 추가는 후속 작업.")
+    # Phase N (PART4): lower-body 모드. 안전상 hoist default.
+    parser.add_argument('--lower-body', dest='lower_body', choices=list(LOWER_BODY_MAPPING.keys()),
+                        default='hoist',
+                        help="lower body 제어: 'hoist'(default) = 기존 동작 (rt/lowcmd, 전체 직접 "
+                             "제어, 호이스트 전제). 'loco' = motion mode (rt/arm_sdk, 상체만 명령, "
+                             "내장 LocoClient 가 밸런싱/보행). loco 는 motion control 진입 (G1 "
+                             "리모컨 L2+B→L2+UP→R1+X) 후 사용. 검증 절차 docs/REMAINING §L11.")
+    parser.add_argument('--gait', choices=['off', 'thumbstick'], default='off',
+                        help="(loco 모드 전용) 'thumbstick' = Quest3 thumbstick 으로 LocoClient.Move "
+                             "보행 제어. 'off' = 보행 없음 (밸런싱만).")
+    parser.add_argument('--gait-stick', dest='gait_stick',
+                        choices=['split', 'left', 'right'], default='split',
+                        help="(gait=thumbstick 전용) stick 매핑: 'split' = 왼쪽 병진 + 오른쪽 회전 "
+                             "(xr_teleoperate 공식). 'left' = 왼쪽 스틱만 (X→vyaw 추가). "
+                             "'right' = 오른쪽 스틱만.")
     # Inspire thumb 사전 자세 (vr_input=controller 일 때만 사용; 손가락 4개는 trigger로 토글)
     # 값 범위: 0.0(굽힘/안쪽) ~ 1.0(펼침/바깥쪽). 물체에 따라 잡기 편한 자세를 사전 설정.
     parser.add_argument('--thumb-bend', dest='thumb_bend', type=float, default=0.5,
@@ -279,6 +295,7 @@ def write_teleop_config(locks, shm_names, args):
         waist_mode  =np.int32(WAIST_MAPPING[args.waist]),
         head_mode   =np.int32(HEAD_MAPPING[args.head]),
         tactile_mode=np.int32(TACTILE_MAPPING[args.tactile]),
+        lower_body  =np.int32(LOWER_BODY_MAPPING[args.lower_body]),
     )
     cfg.worker_close()
 
@@ -306,11 +323,21 @@ def get_worker_specs(args, events, locks, shm_names):
     # set_g1 / set_hand 는 main() 에서 미리 set 되어 worker_g1_ik 등이 FSM RUN 진입.
     if not args.no_robot:
         from workers.worker_g1_ctrl import worker_g1_ctrl
+        # Phase N: lower_body 인자 전달. loco 면 worker_g1_ctrl 가 G1_29_ArmController
+        # 를 motion mode (rt/arm_sdk) 로 init + engage_arm_sdk.
         specs += [
             {'target': worker_g1_ctrl,
-             'args':   (events, shm_names, locks, 'teleop', args.head),
+             'args':   (events, shm_names, locks, 'teleop', args.head, args.lower_body),
              'name':   'worker_g1_ctrl'},
         ]
+        # gait=thumbstick + loco 시 보행 워커 spawn.
+        if args.lower_body == 'loco' and args.gait == 'thumbstick':
+            from workers.worker_loco import worker_loco
+            specs += [
+                {'target': worker_loco,
+                 'args':   (events, shm_names, locks, args.gait_stick),
+                 'name':   'WORKER_LOCO'},
+            ]
     from workers.worker_g1_ik import worker_g1_ik
     specs += [
         {'target': worker_g1_ik,
@@ -454,6 +481,19 @@ def cleanup(processes, managers):
 def main():
     args      = parse_args()
 
+    # Phase N — lower_body / vr_input / waist / gait 안전 검증.
+    if args.lower_body == 'loco':
+        if args.vr_input != 'controller':
+            raise SystemExit("[main] --lower-body loco 는 --vr-input controller 만 지원.")
+        if args.waist == 'hmd':
+            logger_mp.warning(
+                "[main] loco + --waist hmd: motion mode 는 보통 waist 직접 제어 비권장. "
+                "기본은 --waist fixed 권장 (PART4 §3)."
+            )
+    elif args.gait == 'thumbstick':
+        logger_mp.warning("[main] --gait thumbstick 은 --lower-body loco 필요 — gait off 로 강제.")
+        args.gait = 'off'
+
     # Phase K7-A: cameras.yaml 우선 → 단일 카메라 fallback.
     # args.cameras = [{'role','type','serial','name'}, ...] (멀티/단일 모두 동일 구조).
     args.cameras = resolve_cameras_config(args)
@@ -482,6 +522,7 @@ def main():
     logger_mp.info(
         f"[main] hand={args.hand} cameras=[{cams_summary}] "
         f"vr_input={args.vr_input} waist={args.waist} head={args.head} "
+        f"lower_body={args.lower_body} gait={args.gait} "
         f"no_robot={args.no_robot}"
     )
     if args.hand == 'dex3' and args.vr_input == 'hand':

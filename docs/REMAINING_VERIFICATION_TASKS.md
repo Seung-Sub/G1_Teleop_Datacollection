@@ -452,6 +452,79 @@ print('state shape:', z['data/state'].shape)  # (T, 33) 이면 OK, (T, 31) 이�
 
 ---
 
+## L11. Phase N — `--lower-body loco` (motion mode / 보행) 검증
+
+### L11-A. arm_sdk weight ramp 안전 동작
+
+`--lower-body loco` 로 main.py 띄우면 worker_g1_ctrl 가
+`G1_29_ArmController.engage_arm_sdk(ramp_sec=2.0)` 호출 → 약 2초 동안 motor_cmd[29].q
+가 0→1 ramp. 종료 시 stop() 가 disengage_arm_sdk(2.0) 호출 → 1→0 ramp.
+
+**확인**:
+- G1 hoist 가 *내려져* 있고 사용자가 손/허리로 잡고 있는 상태에서 시작 (loco 첫 검증).
+- engage 중 (2s) 팔/허리에 급변 없는지 — `motor_cmd[29].q` 가 0.5 부근에서 weak/wrist 만
+  partial 제어, 정상 동작이면 *부드러운 전이*.
+- main.py 에 SIGINT(Ctrl+C) → disengage ramp 후 종료. 종료 직후 motion controller
+  (`elmo` / `g1_locomotion` 등 firmware 측) 가 다시 hold 자세 잡는지.
+
+**비정상 시**:
+- engage 중 팔이 급가속 → init_motion_mode_lock 단계에서 `arm_q_target = 현재 q` 가
+  제대로 적용 안 됐을 가능성. g1_whole_control.py 의 `_init_motion_mode_lock()` 안에서
+  `self.q_target` 초기화 코드 확인.
+- engage 후 motion controller 가 갑자기 자세 무너지면 firmware 측 motion mode 가
+  arm_sdk 와 충돌. 그 경우 `--gait off` 만 사용하고 `loco.Start()` 호출 안 함.
+
+### L11-B. thumbstick → LocoClient.Move 보행
+
+`--lower-body loco --gait thumbstick --gait-stick split` 권장 (병진 = 왼쪽,
+회전 = 오른쪽 X).
+
+**확인 절차 (보수 → 점진)**:
+1. 처음에는 `loco` 모드 + `--gait off` 로 motion mode 안정성만 확인 (30s).
+2. 다음 `--gait thumbstick` 추가, 사용자는 stick 을 *살짝* 만 (deadzone 0.15 넘어서
+   |v|≈0.05 m/s 정도). worker_loco 의 첫 non-zero Move 에서 `loco.Start()` 호출 →
+   robot 이 보행 모드 진입. 1초 후 stick 중립 → Move(0,0,0,duration=1s) 가 자연 정지.
+3. 점진적으로 stick 폭 늘려 vx=0.15 m/s 까지 (현재 _SCALE_VX). 안정적이면
+   workers/worker_loco.py 의 `_SCALE_VX/_VY = 0.15` → 0.3 까지 상향 (xr_teleoperate
+   공식 상한).
+4. 양쪽 thumbstick click → worker_loco 가 `loco.Damp()` 호출 (soft e-stop, cooldown
+   1s).
+
+**비정상 시**:
+- robot 이 stick 입력 안 받음 → `loco.SetFsmId(...)` 또는 `loco.Start()` 호출 직전 단계
+  실패. logger_mp 의 `[Loco] Start() called` 메시지 유무 확인.
+- continous_move=True 가 실수로 사용되면 명령 한번 보낸 후 stick 놓아도 ~10일 (864000s)
+  동안 그 속도 유지. worker_loco.py 어디에도 `continous_move=True` 없는지 grep 으로
+  재확인.
+
+### L11-C. hoist ↔ loco 데이터 일관성 (deploy 영향)
+
+학습 데이터가 hoist 로 수집되었을 때 loco 모드로 deploy:
+- ROBOT_OBS 의 `obs_leg / obs_waist` 는 motion controller 가 보행 중에도 LowState 로
+  publish — 즉 deploy 시 실제 leg/waist q 가 정책에 들어감 (hoist 데이터의 *고정*
+  leg/waist 와 분포 차이 발생). 학습/배포 모드 정합이 깨지면 정책 출력 quality 저하
+  가능.
+
+**권장**:
+- 첫 운용 단계에서는 hoist 데이터로만 학습 → hoist 모드로 deploy. loco 는 일단
+  텔레오퍼레이션 보행 동작만 검증.
+- 향후 loco 보행 데이터 수집 시 modality.json 에 `lower_body` 메타 추가 권장 (학습
+  시 모드 분리). 현재 TELEOP_CONFIG.lower_body 는 SHM 에만 있고 parquet meta 에는
+  미반영 — Phase N 후 추가 PR 필요 시 `record_collectors.py` 의 episode_meta_json 에
+  `lower_body: 'hoist'|'loco'` 필드 1줄 추가.
+
+### L11-D. evaluate.py 측 영향 없음 (확인 사실)
+
+`evaluate.py` 는 worker_g1_ctrl 을 spawn 하지 않고 main.py 가 owner 인 SHM 에
+attach 만 한다. 따라서 lower_body 는 *main.py 측 단일 결정*. deploy 도 자동 일관:
+- main.py 가 `--lower-body loco` 면 worker_g1_ctrl 의 RUN 분기가 leg/waist 명령을
+  버림 → 정책이 action_leg/action_waist 를 추론해도 robot 에 가지 않음.
+- main.py 가 `--lower-body hoist` (기본) 면 100% 기존 동작.
+
+evaluate.py CLI 에 별도 lower_body flag 추가 *불필요*.
+
+---
+
 ## L10. 잡다 후속 정리
 
 | 항목 | 메모 |
@@ -485,5 +558,6 @@ print('state shape:', z['data/state'].shape)  # (T, 33) 이면 OK, (T, 31) 이�
 | Phase L4 (Part2 P1-5) | (this) | L4-C (IK 예산) |
 | Phase L5 (Part2 P1-6) | (this) | — (Rate 단위 테스트 완료) |
 | Phase L6 (Part2 P2)   | (this) | (이 문서) |
+| Phase N (lower-body)  | (this) | L11-A/B/C/D (motion mode + gait) |
 
 각 commit 의 상세는 `git log --oneline` + 본 워크스페이스의 docs/HARDWARE.md 참고.
