@@ -8,36 +8,58 @@ from utils.record_config import BASE_FOLDER, CHUNK_SIZE
 from utils.frame_utils import process_frames
 
 class VideoSink:
-    """
-    좌/우/RealSense 프레임을 모아
-    videos/chunk-XXX/observation.images.ego_*_view/episode_XXXXXX.mp4 로 저장
+    """View-dynamic mp4 writer.
+
+    `videos/chunk-XXX/<view_name>/episode_XXXXXX.mp4`
+
+    Phase K7-A 이후: start_episode(views=[...]) 로 active view 명을 받아 동적으로
+    buffer 를 생성. append_views(dict) 가 한 axis tick 의 view 별 frame 을 push.
+    backward-compat: 옛 append(left, right, realsense, ...) 시그니처는 그대로 유지.
     """
     def __init__(self, logger, fps: float):
         self.logger = logger
         self.fps = float(fps)
         self._task: Optional[str] = None
         self._ep_idx: Optional[int] = None
-        self._left: Optional[List[np.ndarray]] = None
-        self._right: Optional[List[np.ndarray]] = None
-        self._realsense: Optional[List[np.ndarray]] = None
-        self._left_masked: Optional[List[np.ndarray]] = None
-        self._right_masked: Optional[List[np.ndarray]] = None
+        # 동적 view buffers: view_name → list of frames. None 인 frame 은 skip.
+        self._buffers: Dict[str, List[np.ndarray]] = {}
 
-    def start_episode(self, task_name: str, ep_idx: int):
+    def start_episode(self, task_name: str, ep_idx: int, views: Optional[List[str]] = None):
+        """views: ['observation.images.ego', ...] active view 이름 리스트.
+        backward-compat: views=None 이면 옛 5-view (left/right/realsense/_masked) 모두 준비."""
         self._task = task_name
         self._ep_idx = ep_idx
-        self._left, self._right, self._realsense = [], [], []
-        self._left_masked, self._right_masked = [], []
-        self.logger.info(f"[VIDEO] start episode={ep_idx} (task={task_name})")
+        self._buffers = {}
+        if views is None:
+            views = [
+                'observation.images.ego_left_view',
+                'observation.images.ego_right_view',
+                'observation.images.ego_realsense',
+                'observation.images.ego_left_masked_view',
+                'observation.images.ego_right_masked_view',
+            ]
+        for v in views:
+            self._buffers[v] = []
+        self.logger.info(f"[VIDEO] start episode={ep_idx} (task={task_name}) views={views}")
 
+    def append_views(self, view_payload: Dict[str, Optional[np.ndarray]]):
+        """한 axis tick 의 view 별 frame 을 push. None 인 view 는 skip.
+        새 view name 이 들어오면 자동 등록."""
+        for v, frame in view_payload.items():
+            if frame is None:
+                continue
+            self._buffers.setdefault(v, []).append(frame.copy())
+
+    # ----- backward-compat: 5-view 고정 append -----------------------------
     def append(self, img_left: np.ndarray, img_right: np.ndarray, img_realsense: np.ndarray,
                img_left_masked: np.ndarray = None, img_right_masked: np.ndarray = None):
-        # None 인 view 는 그 episode 동안 비활성 (close_episode 가 빈 list 를 skip 해 mp4 생성 안 함).
-        if img_left      is not None: self._left.append(img_left.copy())
-        if img_right     is not None: self._right.append(img_right.copy())
-        if img_realsense is not None: self._realsense.append(img_realsense.copy())
-        if img_left_masked  is not None: self._left_masked.append(img_left_masked.copy())
-        if img_right_masked is not None: self._right_masked.append(img_right_masked.copy())
+        payload = {}
+        if img_left      is not None: payload['observation.images.ego_left_view']         = img_left
+        if img_right     is not None: payload['observation.images.ego_right_view']        = img_right
+        if img_realsense is not None: payload['observation.images.ego_realsense']         = img_realsense
+        if img_left_masked  is not None: payload['observation.images.ego_left_masked_view']  = img_left_masked
+        if img_right_masked is not None: payload['observation.images.ego_right_masked_view'] = img_right_masked
+        self.append_views(payload)
 
     def close_episode(self) -> Dict[str, str]:
         assert self._task is not None and self._ep_idx is not None
@@ -46,14 +68,15 @@ class VideoSink:
         video_base = os.path.join(task_folder, "videos", f"chunk-{chunk_id:03d}")
         video_name = f"episode_{self._ep_idx:06d}.mp4"
 
-        # imageio FFMPEG writer; skip silently when there is nothing to write.
-        def _write_view(view_name: str, frames_buf: Optional[List], side_label: str):
+        saved: Dict[str, str] = {}
+
+        def _write_view(view_full_name: str, frames_buf: Optional[List]):
             if not frames_buf:
                 return
-            frames = process_frames(self.logger, frames_buf, side=side_label)
+            frames = process_frames(self.logger, frames_buf, side=view_full_name)
             if not frames:
                 return
-            view_dir  = os.path.join(video_base, f"observation.images.{view_name}")
+            view_dir  = os.path.join(video_base, view_full_name)
             os.makedirs(view_dir, exist_ok=True)
             view_path = os.path.join(view_dir, video_name)
             with imageio.get_writer(
@@ -62,15 +85,12 @@ class VideoSink:
             ) as writer:
                 for frame in frames:
                     writer.append_data(frame)
-            self.logger.info(f"[VIDEO] Episode {self._ep_idx} {side_label} 저장: {view_path}")
+            self.logger.info(f"[VIDEO] Episode {self._ep_idx} {view_full_name} saved: {view_path}")
+            saved[view_full_name] = view_path
 
-        _write_view("ego_left_view",         self._left,         "왼쪽")
-        _write_view("ego_right_view",        self._right,        "오른쪽")
-        _write_view("ego_realsense",         self._realsense,    "RealSense")
-        _write_view("ego_left_masked_view",  self._left_masked,  "왼쪽 마스크")
-        _write_view("ego_right_masked_view", self._right_masked, "오른쪽 마스크")
+        for view_full_name, frames_buf in self._buffers.items():
+            _write_view(view_full_name, frames_buf)
 
         # 내부 버퍼 정리
-        self._left = self._right = self._realsense = None
-        self._left_masked = self._right_masked = None
-
+        self._buffers = {}
+        return saved

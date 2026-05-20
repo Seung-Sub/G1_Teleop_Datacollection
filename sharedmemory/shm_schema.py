@@ -68,6 +68,8 @@ WORKER_FREQ = [
 ]
 
 
+# Legacy single-camera SHM. Phase K7-A 이후 사용 안 함 (CAMERA_VIEW 사용).
+# Backward-compat 위해 한동안 schema 만 유지 — 다른 워커가 attach 하지 않으면 free.
 CAMERA = [
     ("camera_left", (480, 640, 3), np.uint8),
     ("camera_right", (480, 640, 3), np.uint8),
@@ -81,6 +83,23 @@ CAMERA = [
 DEPTH_MAP = [
     ("depth_map", (480, 640), np.float32),
     ("depth_map_ts", (), np.int64),
+]
+
+# Phase K7-A (P0-3 + P1-4): 카메라별 독립 SHM. 단일/멀티 카메라 모두 동일 schema
+# (= "ego 1개짜리 멀티뷰") 로 통일 — 단일 운용 시 ego 슬롯만 owner-create.
+# 카메라 1대당 1개 SHM 으로 shmManager.read_data() 전체 copy 비용 절감 +
+# 워커 간 lock 경합 회피. ZED 의 stereo 도 같은 schema 의 ego (단, left/right 두
+# 슬롯) 를 사용할 수 있게 left/right 두 frame 슬롯 유지.
+CAMERA_VIEW = [
+    # color frame 두 슬롯: RealSense 는 left 만 사용 (mono), ZED 는 left/right.
+    ("frame_left",  (480, 640, 3), np.uint8),
+    ("frame_right", (480, 640, 3), np.uint8),
+    # frame 캡처 시각 (host perf_counter_ns — RealSense 는 Global Time 변환값,
+    # ZED 는 direct grab 시각).
+    ("frame_ts",    (),            np.int64),
+    # 본 view 가 stereo 인지 여부 (1=ZED stereo, 0=RealSense mono). reader 가
+    # frame_right 를 사용할지 판단.
+    ("is_stereo",   (),            np.int8),
 ]
 
 # ArUco 마커 인식 결과 공유 메모리 스키마

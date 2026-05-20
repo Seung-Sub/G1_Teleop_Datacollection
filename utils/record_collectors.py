@@ -83,21 +83,19 @@ class RecordCollectors:
     """Per-episode background pollers for streaming SHMs.
 
     Args:
-        shm: dict with keys 'robot_obs', 'robot_action', 'television',
-            'controller', 'camera' — pre-attached SharedMemoryManager
-            handles owned by worker_record.
-        use_zed / use_realsense: which camera substreams to collect.
-            (worker_record already knows from teleop_config_shm.)
+        shm: dict with keys 'robot_obs', 'robot_action', 'television', 'controller'
+            (필수) — pre-attached SharedMemoryManager handles owned by worker_record.
+        camera_shms: dict {role: SharedMemoryManager} — role 별 카메라 SHM 핸들
+            (Phase K7-A). 예: {'ego': shm, 'wrist_l': shm, 'wrist_r': shm}.
+            빈 dict 면 카메라 없음 (--camera none).
     """
 
-    def __init__(self, shm: Dict[str, object], use_zed: bool, use_realsense: bool):
+    def __init__(self, shm: Dict[str, object], camera_shms: Optional[Dict[str, object]] = None):
         self.shm_obs   = shm['robot_obs']
         self.shm_act   = shm['robot_action']
         self.shm_tv    = shm['television']
         self.shm_ctrl  = shm['controller']
-        self.shm_cam   = shm['camera']
-        self.use_zed       = bool(use_zed)
-        self.use_realsense = bool(use_realsense)
+        self.camera_shms: Dict[str, object] = dict(camera_shms or {})
 
         self.bufs: Dict[str, RawStreamBuffer] = {
             'obs_body':    RawStreamBuffer('obs_body',    maxlen=300_000),
@@ -106,9 +104,11 @@ class RecordCollectors:
             'action_hand': RawStreamBuffer('action_hand', maxlen=100_000),
             'television':  RawStreamBuffer('television',  maxlen=50_000),
             'controller':  RawStreamBuffer('controller',  maxlen=50_000),
-            'camera_zed':  RawStreamBuffer('camera_zed',  maxlen=10_000),
-            'camera_rs':   RawStreamBuffer('camera_rs',   maxlen=10_000),
         }
+        # role 별 camera buffer 동적 생성 (Phase K7-A)
+        for role in self.camera_shms.keys():
+            self.bufs[f'camera_{role}'] = RawStreamBuffer(f'camera_{role}', maxlen=10_000)
+
         self._stop = threading.Event()
         self._threads: List[threading.Thread] = []
 
@@ -191,28 +191,22 @@ class RecordCollectors:
             time.sleep(period)
 
     def _poll_camera(self) -> None:
-        # ZED ~30Hz, RealSense ~30Hz. 100Hz poll, copy big frames only on ts change.
-        # Phase K9 (P2): RawStreamBuffer.append 이 이미 ts<=last_ts dedup 을 수행하므로
-        # 외부 _last_ts 비교는 제거. 단 read_data() 가 매 polling 마다 모든 필드를 copy
-        # 하므로 cost 가 큼 → ts 만 먼저 check 하고 변했을 때만 image 읽도록 최적화는
-        # K7-A 의 SHM 분리에서 다룬다 (read_data(fields=[...]) 옵션 또는 SHM 자체 분리).
+        # Phase K7-A: 카메라별 독립 SHM (CAMERA_VIEW schema). role 별로 폴링.
+        # SHM 분리로 read_data() 가 한 카메라 분량만 copy → 멀티 카메라에서도 cost 낮음.
+        # RawStreamBuffer.append 가 ts<=last_ts dedup 처리.
         period = 1.0 / 100.0
         while not self._stop.is_set():
-            try:
-                cam = self.shm_cam.read_data()
-            except Exception:
-                time.sleep(period); continue
-            if self.use_zed:
-                ts_z = int(cam['camera_zed_ts'])
-                self.bufs['camera_zed'].append(ts_z, {
-                    'left':  cam['camera_left'].copy(),
-                    'right': cam['camera_right'].copy(),
-                })
-            if self.use_realsense:
-                ts_r = int(cam['camera_realsense_ts'])
-                self.bufs['camera_rs'].append(ts_r, {
-                    'frame': cam['realsense'].copy(),
-                })
+            for role, shm in self.camera_shms.items():
+                try:
+                    d = shm.read_data()
+                except Exception:
+                    continue
+                ts = int(d['frame_ts'])
+                is_stereo = bool(int(d.get('is_stereo', 0)))
+                payload = {'left': d['frame_left'].copy()}
+                if is_stereo:
+                    payload['right'] = d['frame_right'].copy()
+                self.bufs[f'camera_{role}'].append(ts, payload)
             time.sleep(period)
 
 
@@ -242,10 +236,9 @@ def align_and_save_episode(
     video_sink,
     task_name: str,
     ep_idx: int,
-    use_zed: bool,
-    use_realsense: bool,
     output_hz: float = DEFAULT_OUTPUT_HZ,
     hand_type: str = 'inspire',
+    camera_roles: Optional[list] = None,
 ) -> bool:
     """Build common axis, interpolate every stream onto it, save parquet+mp4.
 
@@ -253,16 +246,17 @@ def align_and_save_episode(
     """
     # 공통 시간축 — body obs / hand obs / camera 가 모두 존재할 때 그들 intersection.
     # 이중 하나라도 없으면 그 stream 의 ts 는 제외하고 나머지로 축 구성.
+    camera_roles = list(camera_roles or [])
     streams_ts = [
         dumped['obs_body'][0],
         dumped['obs_hand'][0],
         dumped['action_body'][0],
         dumped['action_hand'][0],
     ]
-    if use_zed and dumped['camera_zed'][0].size > 0:
-        streams_ts.append(dumped['camera_zed'][0])
-    if use_realsense and dumped['camera_rs'][0].size > 0:
-        streams_ts.append(dumped['camera_rs'][0])
+    for role in camera_roles:
+        key = f'camera_{role}'
+        if key in dumped and dumped[key][0].size > 0:
+            streams_ts.append(dumped[key][0])
     ts_axis = common_time_axis(streams_ts, rate_hz=output_hz)
     if ts_axis.size < 2:
         logger_mp.warning(f"[Record] common axis too small ({ts_axis.size}); skip save.")
@@ -290,12 +284,19 @@ def align_and_save_episode(
     ts_ah, p_ah = dumped['action_hand']
     act_hand = interp_to_axis(ts_ah, _stack(p_ah, 'hand', (14,)), ts_axis, 'zoh') if ts_ah.size else np.zeros((n, 14))
 
-    # ---- ZOH-pick image streams ------------------------------------------
-    ts_cz, p_cz = dumped['camera_zed']
-    ts_cr, p_cr = dumped['camera_rs']
-    zed_left_frames  = _zoh_pick(ts_cz, p_cz, 'left',  ts_axis) if use_zed       else [None]*n
-    zed_right_frames = _zoh_pick(ts_cz, p_cz, 'right', ts_axis) if use_zed       else [None]*n
-    rs_frames        = _zoh_pick(ts_cr, p_cr, 'frame', ts_axis) if use_realsense else [None]*n
+    # ---- ZOH-pick image streams (Phase K7-A: role 기반 dict) ------------
+    # role 별 frame 시퀀스 (stereo 카메라는 'right' 도 함께). VideoSink 가 키별 view 로 저장.
+    camera_frames: Dict[str, list] = {}    # role → list of left frames (len=n)
+    camera_right_frames: Dict[str, list] = {}  # stereo 일 때만
+    for role in camera_roles:
+        key = f'camera_{role}'
+        if key not in dumped or dumped[key][0].size == 0:
+            camera_frames[role] = [None] * n
+            continue
+        ts_c, p_c = dumped[key]
+        camera_frames[role] = _zoh_pick(ts_c, p_c, 'left', ts_axis)
+        if p_c and 'right' in p_c[0]:
+            camera_right_frames[role] = _zoh_pick(ts_c, p_c, 'right', ts_axis)
 
     # ---- Save parquet (LeRobot v2.1 호환 구조 유지) ----------------------
     # Phase K6 (P1-8): hand 종류에 따라 hand DOF 를 12 (Inspire) 또는 14 (DEX3) 로
@@ -329,8 +330,10 @@ def align_and_save_episode(
     parquet_sink.add_extra_column('raw_ts_obs_hand',     _src_ts(ts_oh))
     parquet_sink.add_extra_column('raw_ts_action_body',  _src_ts(ts_ab))
     parquet_sink.add_extra_column('raw_ts_action_hand',  _src_ts(ts_ah))
-    if use_zed:       parquet_sink.add_extra_column('raw_ts_camera_zed', _src_ts(ts_cz))
-    if use_realsense: parquet_sink.add_extra_column('raw_ts_camera_rs',  _src_ts(ts_cr))
+    for role in camera_roles:
+        key = f'camera_{role}'
+        if key in dumped:
+            parquet_sink.add_extra_column(f'raw_ts_camera_{role}', _src_ts(dumped[key][0]))
     parquet_sink.close_episode()
 
     # Phase K6 (P1-8): record/<task>/meta/modality.json 자동 배치 — hand 종류별 분기.
@@ -340,10 +343,24 @@ def align_and_save_episode(
     except Exception as e:
         logger_mp.warning(f"[Record] modality.json 배치 실패: {e}")
 
-    # ---- Save mp4 --------------------------------------------------------
-    video_sink.start_episode(task_name, ep_idx)
+    # ---- Save mp4 (Phase K7-A: role 별 view 동적 저장) ------------------
+    # VideoSink.start_episode 가 active view 명을 받아 동적으로 mp4 파일 생성.
+    # 단일 카메라 = ego 1 view 만 활성, 멀티 카메라 = ego + wrist_l + wrist_r.
+    active_views = []  # ['observation.images.ego', ...]
+    view_frames: Dict[str, list] = {}
+    for role in camera_roles:
+        # LeRobot 호환 키: observation.images.<role>. modality.json 의 video.<role>.original_key 와 일치.
+        active_views.append(f'observation.images.{role}')
+        view_frames[f'observation.images.{role}'] = camera_frames[role]
+        if role in camera_right_frames:
+            # stereo 의 right 도 별도 view 로 저장 (예: ego.right).
+            active_views.append(f'observation.images.{role}_right')
+            view_frames[f'observation.images.{role}_right'] = camera_right_frames[role]
+
+    video_sink.start_episode(task_name, ep_idx, views=active_views)
     for k in range(n):
-        video_sink.append(zed_left_frames[k], zed_right_frames[k], rs_frames[k])
+        view_payload = {v: view_frames[v][k] for v in active_views}
+        video_sink.append_views(view_payload)
     video_sink.close_episode()
 
     return True

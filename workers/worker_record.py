@@ -29,9 +29,9 @@ from utils.record_collectors import RecordCollectors, align_and_save_episode, DE
 
 from sharedmemory.shmManager import SharedMemoryManager
 from sharedmemory.shm_schema import (
-    CAMERA, RECORD_TASK_LAYOUT, RECORD_EPISODE_LAYOUT, RECORD_MODE_LAYOUT,
+    RECORD_TASK_LAYOUT, RECORD_EPISODE_LAYOUT, RECORD_MODE_LAYOUT,
     WORKER_FREQ, ROBOT_ACTION, ROBOT_OBS, WORKSPACE_MASK,
-    TELEOP_CONFIG, CAMERA_MAPPING_INV, HAND_MAPPING_INV,
+    TELEOP_CONFIG, HAND_MAPPING_INV,
     TELEVISION, QUEST_CONTROLLER,
 )
 
@@ -66,7 +66,6 @@ def worker_record(shared_event, shm_name, shared_lock):
     record_task_shm    = attach("record_task_shm",    RECORD_TASK_LAYOUT,    "record_lock")
     record_episode_shm = attach("record_episode_shm", RECORD_EPISODE_LAYOUT, "record_lock")
     record_mode_shm    = attach("record_mode_shm",    RECORD_MODE_LAYOUT,    "record_lock")
-    camera_shm         = attach("camera_shm",         CAMERA,                "camera_lock")
     robot_action_shm   = attach("robot_action_shm",   ROBOT_ACTION,          "robot_action_lock")
     robot_obs_shm      = attach("robot_obs_shm",      ROBOT_OBS,             "robot_obs_lock")
     freq_shm           = attach("freq_shm",           WORKER_FREQ,           "freq_lock")
@@ -75,19 +74,31 @@ def worker_record(shared_event, shm_name, shared_lock):
     television_shm     = attach("television_shm",     TELEVISION,            "television_lock")
     controller_shm     = attach("quest_controller_shm", QUEST_CONTROLLER,    "quest_controller_lock")
 
-    # ── camera_type + hand_type (TELEOP_CONFIG SHM 의 1회 기록 값) ----------
-    camera_type_str = "zed"
+    # Phase K7-A: role 별 카메라 SHM (rs_ego_shm / rs_wrist_l_shm / rs_wrist_r_shm).
+    # main.py 가 cameras.yaml 따라 owner-create 한 SHM 만 attach (이름이 shm_name dict 에 있을 때).
+    from sharedmemory.shm_schema import CAMERA_VIEW as _CAMERA_VIEW
+    role_to_shm = {}
+    for role, shm_key, lock_key in [
+        ('ego',     'rs_ego_shm',     'rs_ego_lock'),
+        ('wrist_l', 'rs_wrist_l_shm', 'rs_wrist_l_lock'),
+        ('wrist_r', 'rs_wrist_r_shm', 'rs_wrist_r_lock'),
+    ]:
+        if shm_key in shm_name:
+            s = attach(shm_key, _CAMERA_VIEW, lock_key)
+            if s is not None:
+                role_to_shm[role] = s
+    active_camera_roles = list(role_to_shm.keys())
+    logger_mp.info(f"[Record] active camera roles: {active_camera_roles}")
+
+    # ── hand_type (TELEOP_CONFIG SHM 의 1회 기록 값). camera 는 role_to_shm 기반.
     hand_type_str   = "inspire"
     if teleop_config_shm is not None:
         try:
             cfg = teleop_config_shm.read_data()
-            camera_type_str = CAMERA_MAPPING_INV.get(int(cfg["camera_type"].item()), "zed")
-            hand_type_str   = HAND_MAPPING_INV.get(int(cfg["hand_type"].item()),     "inspire")
+            hand_type_str = HAND_MAPPING_INV.get(int(cfg["hand_type"].item()), "inspire")
         except Exception as e:
             logger_mp.warning(f"[Record] teleop_config 읽기 실패: {e}")
-    use_zed       = (camera_type_str == "zed")
-    use_realsense = (camera_type_str == "realsense")
-    logger_mp.info(f"[Record] camera_type={camera_type_str} (use_zed={use_zed}, use_realsense={use_realsense}) hand_type={hand_type_str}")
+    logger_mp.info(f"[Record] hand_type={hand_type_str}")
 
     # ── 외부 루프 주파수 (FSM 폴링용 — 데이터 수집 thread 는 collectors 가 별도 thread 로 처리)
     outer_hz = 20.0
@@ -114,10 +125,8 @@ def worker_record(shared_event, shm_name, shared_lock):
                 'robot_action': robot_action_shm,
                 'television':   television_shm,
                 'controller':   controller_shm,
-                'camera':       camera_shm,
             },
-            use_zed=use_zed,
-            use_realsense=use_realsense,
+            camera_shms=role_to_shm,  # Phase K7-A: role → SHM dict
         )
         collectors.start()
 
@@ -134,10 +143,9 @@ def worker_record(shared_event, shm_name, shared_lock):
             video_sink=video_sink,
             task_name=task_name,
             ep_idx=this_ep_idx,
-            use_zed=use_zed,
-            use_realsense=use_realsense,
             output_hz=DEFAULT_OUTPUT_HZ,
-            hand_type=hand_type_str,   # Phase K6: hand 종류별 hand DOF truncation
+            hand_type=hand_type_str,        # Phase K6: hand 종류별 hand DOF truncation
+            camera_roles=active_camera_roles,  # Phase K7-A: role 리스트
         )
 
     def _stop_collectors_discard() -> None:

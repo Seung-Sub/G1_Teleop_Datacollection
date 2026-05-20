@@ -1,24 +1,32 @@
-# Camera role ↔ serial 매핑 (multi-view 확장용 stub).
-# 현재 단일 카메라(ego)만 사용. 멀티 카메라 도입 시 아래에 역할별 serial 추가.
+# Phase K7-A (P0-3): Camera role ↔ serial 매핑.
 #
-# 예시:
+# 단일/멀티 카메라 모두 동일 schema. 단일 운용 시 ego 1개만 두면 됨.
+#
+# role: ego / wrist_l / wrist_r — modality.json 의 video 키 이름과 일치.
+#       (utils/parquet/modality_{inspire,dex3}.json 의 video.{ego,wrist_l,wrist_r})
+# type: realsense | zed
+# serial: 비워두거나 "auto" 면 type 의 첫 device 자동선택.
+#
+# 본 파일이 비어 있고 main.py --cameras-config 가 지정되지 않으면 main.py 는
+# `--camera <serial|auto|none>` 단일 카메라 모드로 동작 (ego 슬롯 1개).
+#
+# 예시 (실 운용에 맞춰 serial 채워 사용):
+#
 # cameras:
-#   - role: ego
+#   - role: ego        # 정면 / 머리 시점 (D435i)
 #     type: realsense
-#     serial: "123456789012"
-#     resolution: [640, 480]
+#     serial: "AUTO_OR_FILL_HERE"
 #     fps: 30
-#   - role: wrist_l
-#     type: realsense
-#     serial: "987654321098"
 #     resolution: [640, 480]
-#     fps: 30
-#   - role: wrist_r
+#   - role: wrist_l    # 왼손목 (D405)
 #     type: realsense
-#     serial: "111222333444"
-#
-# main.py 는 현재 이 yaml 을 참조하지 않는다 — `--camera <serial> --camera-role ego`
-# 같은 CLI 인자만 사용. 추후 yaml-driven multi-camera 도입 시 main.py 의
-# resolve_camera 함수에서 cameras.yaml 을 로드하도록 확장.
+#     serial: "AUTO_OR_FILL_HERE"
+#     fps: 30
+#     resolution: [640, 480]
+#   - role: wrist_r    # 오른손목 (D405)
+#     type: realsense
+#     serial: "AUTO_OR_FILL_HERE"
+#     fps: 30
+#     resolution: [640, 480]
 
 cameras: []

@@ -12,7 +12,10 @@ import matplotlib.pyplot as plt
 from sharedmemory.shmManager import SharedMemoryManager
 # [변경] 공유 메모리 스키마 추가: ARUCO_MARKERS(ArUco 마커 정보), WORKSPACE_MASK(작업 공간 마스크),
 #        MASK_CONTROL_LAYOUT(마스크 생성 제어), DEPTH_MAP(깊이 맵)
-from sharedmemory.shm_schema import CAMERA, ARUCO_MARKERS, WORKSPACE_MASK, WORKER_FREQ, MASK_CONTROL_LAYOUT, DEPTH_MAP
+from sharedmemory.shm_schema import (
+    CAMERA, CAMERA_VIEW, ARUCO_MARKERS, WORKSPACE_MASK, WORKER_FREQ,
+    MASK_CONTROL_LAYOUT, DEPTH_MAP,
+)
 
 import logging_mp
 logger_mp = logging_mp.get_logger(__name__)
@@ -93,16 +96,23 @@ def _create_workspace_mask(image, corners, ids):
 
     return mask, mask_contour, marker_corners_flat
 
-def worker_zed(shared_event, shm_name, shared_lock, serial=None, zed_mode='direct'):
+def worker_zed(shared_event, shm_name, shared_lock,
+               serial=None, zed_mode='direct', shm_key=None, lock_key=None):
     """ZED stereo worker.
 
     Args:
         serial: ZED device serial (int 또는 str). None 이면 첫 번째 device.
         zed_mode: 'direct' (sl.Camera.open USB direct) | 'stream' (set_from_stream).
                   stream 모드는 Jetson 등 외부 PC 가 ZED 를 들고 송신 중일 때만.
+        shm_key / lock_key: Phase K7-A. None 이면 'camera_shm'/'camera_lock'.
+                  멀티-카메라 운용 시 main.py 가 role 별 SHM key 전달.
     """
-    # 3) SharedMemoryManager 초기화 (필요하다면 사용)
-    camera_shm = SharedMemoryManager(CAMERA, shared_lock["camera_lock"], shm_name["camera_shm"])
+    # Phase K7-A: CAMERA_VIEW schema (frame_left/right/ts/is_stereo) 통일.
+    # 기존 'camera_shm' (CAMERA schema) 는 backward-compat 위해 main.py 에서
+    # alias 로 같은 segment 를 가리키지 않고, 멀티-cam 도입 시 SHM key 로 분기.
+    if shm_key  is None: shm_key  = 'camera_shm'
+    if lock_key is None: lock_key = 'camera_lock'
+    camera_shm = SharedMemoryManager(CAMERA_VIEW, shared_lock[lock_key], shm_name[shm_key])
     # [추가] ArUco 마커 정보 공유 메모리: 감지된 마커의 ID, 코너 좌표, 중심점 등 저장
     aruco_shm = SharedMemoryManager(ARUCO_MARKERS, shared_lock["aruco_lock"], shm_name["aruco_shm"])
     # [추가] 작업 공간 마스크 공유 메모리: 생성된 마스크 데이터를 다른 워커와 공유
@@ -400,13 +410,13 @@ def worker_zed(shared_event, shm_name, shared_lock, serial=None, zed_mode='direc
 
                 #print(f"[ZED]   📦 작업 공간 마스크 생성됨 ({np.sum(mask_l > 0)} 픽셀)")
 
-                # [변경] camera_shm.write_data 변경: 원본에는 small_l, small_r를 직접 저장했지만,
-                #        여기서는 원본 이미지(small_l_raw, small_r_raw)를 저장 (마스킹은 다른 워커에서 수행)
-                # 공유 메모리에 카메라와 ArUco 데이터 저장
+                # 공유 메모리에 stereo 이미지 + ArUco 데이터 저장. CAMERA_VIEW
+                # schema 통일 (frame_left/right/ts/is_stereo).
                 camera_shm.write_data(
-                    camera_left=small_l_raw,
-                    camera_right=small_r_raw,
-                    camera_zed_ts=np.int64(time.perf_counter_ns()),
+                    frame_left =small_l_raw,
+                    frame_right=small_r_raw,
+                    frame_ts   =np.int64(time.perf_counter_ns()),
+                    is_stereo  =np.int8(1),  # ZED 는 stereo
                 )
                 # [추가] ArUco 마커 정보를 공유 메모리에 저장: UI에 마커 위치 표시용
                 aruco_shm.write_data(

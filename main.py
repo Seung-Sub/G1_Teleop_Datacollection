@@ -25,7 +25,7 @@ import logging_mp
 from sharedmemory.shmManager import SharedMemoryManager
 
 from sharedmemory.shm_schema import (
-    CAMERA, TELEVISION, ARUCO_MARKERS, WORKSPACE_MASK,
+    CAMERA, CAMERA_VIEW, TELEVISION, ARUCO_MARKERS, WORKSPACE_MASK,
     RECORD_TASK_LAYOUT, RECORD_EPISODE_LAYOUT, RECORD_MODE_LAYOUT,
     LEFT_TOUCH_SENSOR_LAYOUT, RIGHT_TOUCH_SENSOR_LAYOUT,
     WORKER_FREQ, GR00T_TASK_LAYOUT, ROBOT_OBS, ROBOT_ACTION,
@@ -59,7 +59,10 @@ except RuntimeError:
     pass
 logger_mp = logging_mp.get_logger(__name__)
 
-# Shared-memory configurations: layout constant, shm name, lock key
+# Shared-memory configurations: layout constant, shm name, lock key.
+# Phase K7-A (P0-3 + P1-4): camera_shm 은 backward-compat 만 — CAMERA_VIEW 기반의
+# role 별 SHM (rs_ego_shm / rs_wrist_l_shm / rs_wrist_r_shm) 이 실제 사용 SHM.
+# main() 에서 cameras 설정에 따라 동적으로 SHM_CONFIG 에 추가.
 SHM_CONFIG = {
     'camera_shm':           (CAMERA,                    'camera_shm',           'camera_lock'),
     'television_shm':       (TELEVISION,                'television_shm',       'television_lock'),
@@ -110,6 +113,10 @@ def create_locks():
         'robot_obs_lock':        Lock(),
         'robot_action_lock':     Lock(),
         'depth_map_lock':        Lock(),
+        # Phase K7-A: 카메라 role 별 lock (단일 운용 시 ego 만 사용).
+        'rs_ego_lock':           Lock(),
+        'rs_wrist_l_lock':       Lock(),
+        'rs_wrist_r_lock':       Lock(),
     }
 
 
@@ -135,6 +142,9 @@ def parse_args():
                         help='Camera role label (ego, wrist_l, wrist_r, ...). 기본 ego; 시리얼 지정 시 추후 yaml 매핑.')
     parser.add_argument('--zed-mode',  dest='zed_mode', choices=['direct', 'stream'], default='direct',
                         help="ZED 연결 방식: 'direct' = sl.Camera.open(USB), 'stream' = set_from_stream(외부 송신).")
+    parser.add_argument('--cameras-config', dest='cameras_config',
+                        default='utils/cameras.yaml',
+                        help='cameras.yaml 경로. 비어있으면 --camera 단일 카메라 모드.')
     parser.add_argument('--vr-input', dest='vr_input',
                         choices=list(VR_INPUT_MAPPING.keys()),
                         default='hand',
@@ -160,6 +170,8 @@ def resolve_camera(args):
     """Resolve --camera 값(zed/realsense/auto/none/<serial>) 을 (type, serial, name) 으로 반환.
 
     type ∈ {'zed', 'realsense', 'none'}. serial 은 worker_camera/worker_zed 가 사용.
+    Phase K7-A 이후: 본 함수는 단일 카메라 (ego 1대) 경로용. 멀티-카메라는
+    resolve_cameras_config() 가 cameras.yaml 을 읽어 처리.
     """
     cam = (args.camera or 'auto').strip()
     if cam == 'none':
@@ -187,12 +199,78 @@ def resolve_camera(args):
     return res
 
 
+def resolve_cameras_config(args):
+    """cameras.yaml 을 읽어 활성 카메라 리스트 반환.
+
+    Returns:
+        list of dict: [{'role', 'type', 'serial', 'name'}, ...]
+        - yaml 의 cameras 가 비어 있거나 파일 없으면 → 단일 카메라 모드.
+          resolve_camera(args) 결과를 ego 1개로 wrap.
+        - --camera none 이면 빈 list 반환.
+
+    설계 (사용자 지시서 K7,8,9_Instruction.md §25 채택):
+        "단일=ego 1개짜리 멀티뷰" 로 통일. SHM 이름 체계 / record / deploy 에서
+        분기 없이 동일 경로로 처리. 단일 운용 = cameras 리스트 길이 1.
+    """
+    import yaml as _yaml
+    import os as _os
+    yaml_path = args.cameras_config
+    if yaml_path and _os.path.exists(yaml_path):
+        try:
+            with open(yaml_path) as f:
+                cfg = _yaml.safe_load(f) or {}
+            cams = cfg.get('cameras') or []
+        except Exception as e:
+            logger_mp.warning(f"[main] {yaml_path} parse 실패: {e} — 단일 카메라 fallback")
+            cams = []
+    else:
+        cams = []
+
+    if cams:
+        # YAML driven multi-camera (or single via yaml)
+        out = []
+        for cam in cams:
+            role = cam.get('role', 'ego')
+            typ  = cam.get('type', 'realsense')
+            sn   = cam.get('serial')
+            if sn in (None, '', 'auto', 'AUTO_OR_FILL_HERE'):
+                # auto-select 첫 device
+                from utils.camera_discovery import discover_realsense, discover_zed
+                devs = discover_realsense() if typ == 'realsense' else discover_zed()
+                if devs:
+                    sn = devs[0]['serial']
+                    nm = devs[0]['name']
+                else:
+                    logger_mp.warning(f"[main] cameras.yaml role={role} type={typ}: device 없음 — skip")
+                    continue
+            else:
+                nm = None
+            out.append({'role': role, 'type': typ, 'serial': str(sn), 'name': nm})
+        return out
+
+    # YAML 미사용 → 단일 카메라 (ego 1대)
+    typ, sn, nm = resolve_camera(args)
+    if typ == 'none':
+        return []
+    return [{'role': 'ego', 'type': typ, 'serial': str(sn) if sn else None, 'name': nm}]
+
+
+# Phase K7-A: role 별 SHM key / lock key 매핑.
+ROLE_TO_SHM_KEY  = {'ego': 'rs_ego_shm',  'wrist_l': 'rs_wrist_l_shm',  'wrist_r': 'rs_wrist_r_shm'}
+ROLE_TO_LOCK_KEY = {'ego': 'rs_ego_lock', 'wrist_l': 'rs_wrist_l_lock', 'wrist_r': 'rs_wrist_r_lock'}
+
+
 def write_teleop_config(locks, shm_names, args):
     """Write the chosen options into TELEOP_CONFIG SHM (info-only)."""
+    # camera_type 은 cameras 리스트의 첫 카메라 type 기준 (단일/멀티 모두).
+    if args.cameras:
+        cam_type_str = args.cameras[0]['type']
+    else:
+        cam_type_str = 'none'
     cfg = SharedMemoryManager(TELEOP_CONFIG, locks["record_lock"], shm_names["teleop_config_shm"])
     cfg.write_data(
         hand_type  =np.int32(HAND_MAPPING[args.hand]),
-        camera_type=np.int32(CAMERA_MAPPING[args.resolved_camera]),
+        camera_type=np.int32(CAMERA_MAPPING.get(cam_type_str, CAMERA_MAPPING['none'])),
         vr_input   =np.int32(VR_INPUT_MAPPING[args.vr_input]),
         waist_mode =np.int32(WAIST_MAPPING[args.waist]),
         head_mode  =np.int32(HEAD_MAPPING[args.head]),
@@ -261,21 +339,30 @@ def get_worker_specs(args, events, locks, shm_names):
         else:
             raise ValueError(f"Unsupported hand hardware: {args.hand}")
 
-    # ---- Camera (zed / realsense / none) -----------------------------
-    if args.resolved_camera == 'zed':
-        from workers.worker_zed import worker_zed
-        specs += [{'target': worker_zed,
-                   'args':   (events, shm_names, locks, args.camera_serial, args.zed_mode),
-                   'name':   'WORKER_ZED'}]
-    elif args.resolved_camera == 'realsense':
-        from workers.worker_camera import worker_camera
-        specs += [{'target': worker_camera,
-                   'args':   (events, shm_names, locks, args.camera_serial),
-                   'name':   'WORKER_Realsense'}]
-    elif args.resolved_camera == 'none':
+    # ---- Camera (Phase K7-A: cameras 리스트 기반 N개 worker spawn) --------
+    # args.cameras = [{'role','type','serial','name'}, ...] (0..3개)
+    if not args.cameras:
         logger_mp.info("[main] camera disabled — no camera worker spawned.")
     else:
-        raise ValueError(f"Unsupported resolved camera type: {args.resolved_camera}")
+        for cam in args.cameras:
+            role     = cam['role']
+            typ      = cam['type']
+            sn       = cam.get('serial')
+            shm_key  = ROLE_TO_SHM_KEY[role]
+            lock_key = ROLE_TO_LOCK_KEY[role]
+            if typ == 'realsense':
+                from workers.worker_camera import worker_camera
+                specs += [{'target': worker_camera,
+                           'args':   (events, shm_names, locks, sn, role, shm_key, lock_key),
+                           'name':   f'WORKER_RS_{role.upper()}'}]
+            elif typ == 'zed':
+                from workers.worker_zed import worker_zed
+                specs += [{'target': worker_zed,
+                           'args':   (events, shm_names, locks, sn, args.zed_mode, shm_key, lock_key),
+                           'name':   f'WORKER_ZED_{role.upper()}'}]
+            else:
+                raise ValueError(f"Unsupported camera type: {typ}")
+            logger_mp.info(f"[main] camera spawn: role={role} type={typ} serial={sn} → shm={shm_key}")
 
     # ---- Recording (always-on) --------------------------------------
     specs += [{'target': worker_record, 'args': (events, shm_names, locks),
@@ -345,8 +432,15 @@ def cleanup(processes, managers):
 def main():
     args      = parse_args()
 
-    # camera 해석 (auto/serial → 실제 type+serial). args.resolved_camera, args.camera_serial 세팅.
-    args.resolved_camera, args.camera_serial, args.camera_name = resolve_camera(args)
+    # Phase K7-A: cameras.yaml 우선 → 단일 카메라 fallback.
+    # args.cameras = [{'role','type','serial','name'}, ...] (멀티/단일 모두 동일 구조).
+    args.cameras = resolve_cameras_config(args)
+    # role 별 SHM 을 SHM_CONFIG 에 동적 추가 (owner-create 대상에 포함).
+    for cam in args.cameras:
+        role = cam['role']
+        shm_key  = ROLE_TO_SHM_KEY[role]
+        lock_key = ROLE_TO_LOCK_KEY[role]
+        SHM_CONFIG[shm_key] = (CAMERA_VIEW, shm_key, lock_key)
 
     events    = create_events()
     locks     = create_locks()
@@ -362,9 +456,9 @@ def main():
             "worker_g1_ik 는 정상 spawn 되어 Quest3 입력에 대한 IK 계산만 수행."
         )
 
+    cams_summary = ', '.join(f"{c['role']}={c['type']}:{c.get('serial')}" for c in args.cameras) or 'none'
     logger_mp.info(
-        f"[main] hand={args.hand} camera={args.resolved_camera} "
-        f"(serial={args.camera_serial}, name={args.camera_name}) "
+        f"[main] hand={args.hand} cameras=[{cams_summary}] "
         f"vr_input={args.vr_input} waist={args.waist} head={args.head} "
         f"no_robot={args.no_robot}"
     )
