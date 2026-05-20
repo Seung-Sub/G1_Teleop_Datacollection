@@ -64,17 +64,28 @@ def common_time_axis(streams_ts: list, rate_hz: float = 50.0) -> np.ndarray:
 
     The axis spans from max(min(ts)) to min(max(ts)) across non-empty streams
     (the intersection — guarantees every output sample has *some* source).
-    Falls back to the first non-empty stream if intersection is empty.
+
+    Phase K9 (P2-7): intersection 이 비면 silent fallback 하지 않고 **빈 축**을
+    반환한다. 이전 동작 ("첫 stream 범위 follow") 은 어떤 워커가 멈췄거나
+    ts 가 깨졌을 때 잘못된 에피소드를 조용히 저장하는 위험이 있었다. 호출자
+    (align_and_save_episode) 는 ts_axis.size < 2 분기에서 저장을 건너뛴다.
     """
+    import logging
     valid = [t for t in streams_ts if isinstance(t, np.ndarray) and t.size > 0]
     if not valid:
         return np.empty(0, dtype=np.int64)
     t_start = max(int(t[0])  for t in valid)
     t_end   = min(int(t[-1]) for t in valid)
     if t_end <= t_start:
-        # streams 가 시간상 겹치지 않으면 첫 stream 범위를 따른다.
-        t0 = valid[0]
-        t_start, t_end = int(t0[0]), int(t0[-1])
+        # intersection 비어있음 → 빈 축 + 경고 로그. 저장 측이 명시적 skip.
+        try:
+            logging.getLogger(__name__).warning(
+                f"[align] common_time_axis: stream intersection empty "
+                f"(t_start={t_start}, t_end={t_end}) — returning empty axis."
+            )
+        except Exception:
+            pass
+        return np.empty(0, dtype=np.int64)
     period_ns = int(1e9 / float(rate_hz))
     n = max(1, (t_end - t_start) // period_ns + 1)
     return t_start + np.arange(n, dtype=np.int64) * period_ns

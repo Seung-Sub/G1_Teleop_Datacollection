@@ -192,6 +192,10 @@ class RecordCollectors:
 
     def _poll_camera(self) -> None:
         # ZED ~30Hz, RealSense ~30Hz. 100Hz poll, copy big frames only on ts change.
+        # Phase K9 (P2): RawStreamBuffer.append 이 이미 ts<=last_ts dedup 을 수행하므로
+        # 외부 _last_ts 비교는 제거. 단 read_data() 가 매 polling 마다 모든 필드를 copy
+        # 하므로 cost 가 큼 → ts 만 먼저 check 하고 변했을 때만 image 읽도록 최적화는
+        # K7-A 의 SHM 분리에서 다룬다 (read_data(fields=[...]) 옵션 또는 SHM 자체 분리).
         period = 1.0 / 100.0
         while not self._stop.is_set():
             try:
@@ -200,19 +204,15 @@ class RecordCollectors:
                 time.sleep(period); continue
             if self.use_zed:
                 ts_z = int(cam['camera_zed_ts'])
-                if ts_z > 0 and (self.bufs['camera_zed']._last_ts is None
-                                 or ts_z > self.bufs['camera_zed']._last_ts):
-                    self.bufs['camera_zed'].append(ts_z, {
-                        'left':  cam['camera_left'].copy(),
-                        'right': cam['camera_right'].copy(),
-                    })
+                self.bufs['camera_zed'].append(ts_z, {
+                    'left':  cam['camera_left'].copy(),
+                    'right': cam['camera_right'].copy(),
+                })
             if self.use_realsense:
                 ts_r = int(cam['camera_realsense_ts'])
-                if ts_r > 0 and (self.bufs['camera_rs']._last_ts is None
-                                 or ts_r > self.bufs['camera_rs']._last_ts):
-                    self.bufs['camera_rs'].append(ts_r, {
-                        'frame': cam['realsense'].copy(),
-                    })
+                self.bufs['camera_rs'].append(ts_r, {
+                    'frame': cam['realsense'].copy(),
+                })
             time.sleep(period)
 
 
