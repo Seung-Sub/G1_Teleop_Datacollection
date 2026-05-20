@@ -236,13 +236,16 @@ def align_and_save_episode(
     ts_oh, p_oh = dumped['obs_hand']
     obs_hand = interp_to_axis(ts_oh, _stack(p_oh, 'hand', (14,)), ts_axis, 'linear') if ts_oh.size else np.zeros((n, 14))
 
+    # Phase K5 (P0-2): action 계열은 piecewise-constant (publish 시점에 고정된 명령) →
+    # ZOH 보간이 의미론적으로 맞다. linear 로 보간하면 실제 보낸 적 없는 중간값이
+    # 생성된다 (특히 DEX3 trigger toggle 같은 이산적 명령).
     ts_ab, p_ab = dumped['action_body']
-    act_waist = interp_to_axis(ts_ab, _stack(p_ab, 'waist', (3,)),  ts_axis, 'linear') if ts_ab.size else np.zeros((n, 3))
-    act_head  = interp_to_axis(ts_ab, _stack(p_ab, 'head',  (2,)),  ts_axis, 'linear') if ts_ab.size else np.zeros((n, 2))
-    act_arm   = interp_to_axis(ts_ab, _stack(p_ab, 'arm',   (14,)), ts_axis, 'linear') if ts_ab.size else np.zeros((n, 14))
+    act_waist = interp_to_axis(ts_ab, _stack(p_ab, 'waist', (3,)),  ts_axis, 'zoh') if ts_ab.size else np.zeros((n, 3))
+    act_head  = interp_to_axis(ts_ab, _stack(p_ab, 'head',  (2,)),  ts_axis, 'zoh') if ts_ab.size else np.zeros((n, 2))
+    act_arm   = interp_to_axis(ts_ab, _stack(p_ab, 'arm',   (14,)), ts_axis, 'zoh') if ts_ab.size else np.zeros((n, 14))
 
     ts_ah, p_ah = dumped['action_hand']
-    act_hand = interp_to_axis(ts_ah, _stack(p_ah, 'hand', (14,)), ts_axis, 'linear') if ts_ah.size else np.zeros((n, 14))
+    act_hand = interp_to_axis(ts_ah, _stack(p_ah, 'hand', (14,)), ts_axis, 'zoh') if ts_ah.size else np.zeros((n, 14))
 
     # ---- ZOH-pick image streams ------------------------------------------
     ts_cz, p_cz = dumped['camera_zed']

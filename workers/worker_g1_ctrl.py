@@ -170,13 +170,19 @@ class G1CtrlWorker(DualRateWorker):
         else:
             obs_head  = np.zeros(2, dtype=np.float32)
 
-        # SHM 쓰기 — body obs ts 도 함께 (hand obs ts 는 worker_hand_ctrl 가 관리)
+        # SHM 쓰기 — body obs ts 는 DDS Read() 직후 캡처된 recv_ts 를 사용 (Phase K2).
+        # do_fast 가 300Hz 인데 LowState 가 ~500Hz 도 도착 시 같은 ts 가 반복될 수 있고,
+        # 그 경우 RawStreamBuffer.append 의 ts<=last_ts dedup 으로 가짜 중복이 자동 제거됨.
+        recv_ts = self.g1_ctrl.get_state_recv_ts()
+        if recv_ts <= 0:
+            # 아직 첫 LowState 수신 전 — 다음 fast tick 까지 skip (가짜 0 ts 방지)
+            return
         self.robot_obs_shm.write_data(
             obs_leg=obs_leg,
             obs_waist=obs_waist,
             obs_head=obs_head,
             obs_arm=obs_arm,
-            obs_body_ts=np.int64(time.perf_counter_ns()),
+            obs_body_ts=np.int64(recv_ts),
         )
 
     # 리소스 정리

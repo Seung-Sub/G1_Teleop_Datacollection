@@ -31,6 +31,10 @@ class G1_29_LowState:
         self.motor_state = [MotorState() for _ in range(G1_29_Num_Motors)]
         self.imu_quat = np.zeros(4, dtype=np.float32)
         self.gyroscope = np.zeros(3, dtype=np.float32)
+        # Phase K2 (P0-1.2): DDS 수신 시각 (perf_counter_ns) + robot-internal tick (uint32).
+        # SDK IDL: LowState_.tick: types.uint32 — robot-internal clock 출처.
+        self.recv_ts = 0      # host perf_counter_ns at Read() 직후
+        self.robot_tick = 0   # msg.tick 그대로 (robot-internal)
 
 class DataBuffer:
     def __init__(self):
@@ -128,8 +132,15 @@ class G1_29_ArmController:
             msg = self.lowstate_subscriber.Read()
 
             if msg is not None:
+                # 수신 즉시 host 시각 캡처 (Phase K2). msg.tick (robot-internal uint32) 도 보존.
+                recv_ts = time.perf_counter_ns()
                 self.remote.set(msg.wireless_remote)
                 lowstate = G1_29_LowState()
+                lowstate.recv_ts = recv_ts
+                try:
+                    lowstate.robot_tick = int(msg.tick)
+                except Exception:
+                    lowstate.robot_tick = 0
                 for i in range(G1_29_Num_Motors):
                     lowstate.motor_state[i].q  = msg.motor_state[i].q
                     lowstate.motor_state[i].dq = msg.motor_state[i].dq
@@ -139,6 +150,17 @@ class G1_29_ArmController:
                 self.lowstate_buffer.SetData(lowstate)
 
             self.obs_rate.sleep()
+
+    # ----- Phase K2 helpers ------------------------------------------------
+    def get_state_recv_ts(self) -> int:
+        """Latest LowState 의 host perf_counter_ns 수신 시각. 0 이면 아직 미수신."""
+        state = self.lowstate_buffer.GetData()
+        return int(getattr(state, "recv_ts", 0)) if state is not None else 0
+
+    def get_state_robot_tick(self) -> int:
+        """Latest LowState 의 robot-internal tick (uint32). 0 이면 아직 미수신."""
+        state = self.lowstate_buffer.GetData()
+        return int(getattr(state, "robot_tick", 0)) if state is not None else 0
 #----------------------------------------------------------------------------------------------------------------------------------------------------------------------------#
     def clip_leg_q_target(self, target_q, velocity_limit):
         current_q = self.get_current_leg_q()

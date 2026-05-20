@@ -145,9 +145,19 @@ def worker_hand_ctrl(shared_event, shm_name, shared_lock,
                     n        = len(dual_hand_state_array)
                     obs14[:n] = dual_hand_state_array[:]
                     act14[:n] = dual_hand_action_array[:]
-                    ts_hand = np.int64(time.perf_counter_ns())
-                    robot_obs_shm.write_data(obs_hand=obs14, obs_hand_ts=ts_hand)
-                    robot_action_shm.write_data(action_hand=act14, action_hand_ts=ts_hand)
+                    # Phase K4 (P0-1.4): obs 는 DDS 수신 시각, action 은 publish 시각.
+                    # 둘이 다른 시점/출처라서 같은 ts 를 공유하면 안 됨.
+                    try:
+                        ts_obs_hand = int(hand_ctrl.get_hand_state_recv_ts())
+                    except AttributeError:
+                        ts_obs_hand = time.perf_counter_ns()  # 구버전 controller fallback
+                    if ts_obs_hand <= 0:
+                        # 아직 첫 state 수신 전 — write skip (가짜 0 ts 방지)
+                        pass
+                    else:
+                        ts_act_hand = time.perf_counter_ns()
+                        robot_obs_shm.write_data(obs_hand=obs14, obs_hand_ts=np.int64(ts_obs_hand))
+                        robot_action_shm.write_data(action_hand=act14, action_hand_ts=np.int64(ts_act_hand))
 
 
                 if replay and not replay_demo_init :
@@ -247,14 +257,19 @@ def worker_hand_ctrl(shared_event, shm_name, shared_lock,
                     hand_ctrl.ctrl_dual_hand(left_q_target=left_q_target,
                                             right_q_target=right_q_target)
 
-                # 매 사이클 obs_hand SHM 갱신 — record/UI 가 최신 값을 읽도록.
+                # 매 사이클 obs_hand SHM 갱신 — DDS 수신 시각 (Phase K4) 으로 ts.
                 obs14 = np.zeros(14, dtype=np.float64)
                 n     = len(dual_hand_state_array)
                 obs14[:n] = dual_hand_state_array[:]
-                robot_obs_shm.write_data(
-                    obs_hand=obs14,
-                    obs_hand_ts=np.int64(time.perf_counter_ns()),
-                )
+                try:
+                    ts_obs_hand = int(hand_ctrl.get_hand_state_recv_ts())
+                except AttributeError:
+                    ts_obs_hand = time.perf_counter_ns()
+                if ts_obs_hand > 0:
+                    robot_obs_shm.write_data(
+                        obs_hand=obs14,
+                        obs_hand_ts=np.int64(ts_obs_hand),
+                    )
             
                 rate.sleep()
 

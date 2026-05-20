@@ -72,14 +72,17 @@ class Inspire_Controller:
 
         self.left_hand_state_array  = Array('d', Inspire_Num_Motors, lock=True)
         self.right_hand_state_array = Array('d', Inspire_Num_Motors, lock=True)
-        
+        # Phase K3 (P0-1.3): DDS 수신 시각 (host perf_counter_ns). DEX3 와 대칭.
+        self.left_state_recv_ts  = 0
+        self.right_state_recv_ts = 0
+
         self.cmd_L = inspire_hand_defaut.get_inspire_hand_ctrl()
         self.cmd_R = inspire_hand_defaut.get_inspire_hand_ctrl()
 
 
-        # Separate subscribe threads for each hand
-        self.subscribe_Lstate_thread = threading.Thread(target=self._subscribe_hand_state, args=(self.HandState_subscriber_L, self.left_hand_state_array))
-        self.subscribe_Rstate_thread = threading.Thread(target=self._subscribe_hand_state, args=(self.HandState_subscriber_R, self.right_hand_state_array))
+        # Separate subscribe threads for each hand — side 인자로 recv_ts 분기.
+        self.subscribe_Lstate_thread = threading.Thread(target=self._subscribe_hand_state, args=(self.HandState_subscriber_L, self.left_hand_state_array,  'l'))
+        self.subscribe_Rstate_thread = threading.Thread(target=self._subscribe_hand_state, args=(self.HandState_subscriber_R, self.right_hand_state_array, 'r'))
         self.subscribe_Lstate_thread.daemon = True
         self.subscribe_Lstate_thread.start()        
         self.subscribe_Rstate_thread.daemon = True
@@ -99,13 +102,27 @@ class Inspire_Controller:
 
         logger_mp.info("Initialize Inspire_Controller OK!\n")
 
-    def _subscribe_hand_state(self, subscriber, state_array):
+    def _subscribe_hand_state(self, subscriber, state_array, side='l'):
         while True:
             hand_msg = subscriber.Read()
             if hand_msg is not None:
+                # Phase K3: 수신 직후 host 시각 캡처.
+                recv_ts = time.perf_counter_ns()
                 for idx in range(Inspire_Num_Motors):
                     state_array[idx] = hand_msg.angle_act[idx]
+                if side == 'l':
+                    self.left_state_recv_ts  = recv_ts
+                else:
+                    self.right_state_recv_ts = recv_ts
             time.sleep(0.002)
+
+    def get_hand_state_recv_ts(self) -> int:
+        """좌/우 중 더 오래된 recv_ts. DEX3 와 동일 의미."""
+        l = int(self.left_state_recv_ts)
+        r = int(self.right_state_recv_ts)
+        if l <= 0 or r <= 0:
+            return max(l, r)
+        return min(l, r)
 
     def ctrl_dual_hand(self, left_q_target, right_q_target):
 

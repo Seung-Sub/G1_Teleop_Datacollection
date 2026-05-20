@@ -160,6 +160,10 @@ class Dex3_Controller:
 
         self.left_hand_state_array  = Array('d', Dex3_Num_Motors, lock=True)
         self.right_hand_state_array = Array('d', Dex3_Num_Motors, lock=True)
+        # Phase K3 (P0-1.3): DDS 수신 시각 (host perf_counter_ns). 좌/우 별도.
+        # _subscribe_hand_state 가 msg 수신 직후 갱신, control_process 가 read.
+        self.left_state_recv_ts  = 0
+        self.right_state_recv_ts = 0
 
         # init cmd msg + motor_mode
         self.left_msg  = unitree_hg_msg_dds__HandCmd_()
@@ -180,15 +184,17 @@ class Dex3_Controller:
             self.right_msg.motor_cmd[id].kp  = 1.5
             self.right_msg.motor_cmd[id].kd  = 0.2
 
-        # State subscribe threads
+        # State subscribe threads — side 인자 ('l'/'r') 로 recv_ts 분기 (Phase K3)
         self.subscribe_Lstate_thread = threading.Thread(
             target=self._subscribe_hand_state,
-            args=(self.LeftHandState_subscriber, self.left_hand_state_array, Dex3_1_Left_JointIndex),
+            args=(self.LeftHandState_subscriber,  self.left_hand_state_array,
+                  Dex3_1_Left_JointIndex,  'l'),
             daemon=True,
         )
         self.subscribe_Rstate_thread = threading.Thread(
             target=self._subscribe_hand_state,
-            args=(self.RightHandState_subscriber, self.right_hand_state_array, Dex3_1_Right_JointIndex),
+            args=(self.RightHandState_subscriber, self.right_hand_state_array,
+                  Dex3_1_Right_JointIndex, 'r'),
             daemon=True,
         )
         self.subscribe_Lstate_thread.start()
@@ -212,13 +218,34 @@ class Dex3_Controller:
         logger_mp.info("Initialize Dex3_Controller OK!\n")
 
     # ------------------------------------------------------------------
-    def _subscribe_hand_state(self, subscriber, state_array, joint_index_enum):
+    def _subscribe_hand_state(self, subscriber, state_array, joint_index_enum, side):
         while True:
             msg = subscriber.Read()
             if msg is not None:
+                # Phase K3: 수신 직후 host 시각 캡처. control_process / worker_hand_ctrl
+                # 가 이 ts 를 obs_hand_ts 로 사용해 latency 정확도 향상.
+                recv_ts = time.perf_counter_ns()
                 for idx, jid in enumerate(joint_index_enum):
                     state_array[idx] = msg.motor_state[jid].q
+                if side == 'l':
+                    self.left_state_recv_ts  = recv_ts
+                else:
+                    self.right_state_recv_ts = recv_ts
             time.sleep(0.002)
+
+    def get_hand_state_recv_ts(self) -> int:
+        """좌/우 중 더 오래된 recv_ts 반환 (worker_hand_ctrl 가 obs_hand_ts 로 사용).
+
+        더 오래된 쪽을 채택하는 이유: state_array (좌+우) 둘 다 valid 이려면 두 쪽 모두
+        publish 된 시점이 필요. 최신값 둘 중 *늦은 게 도착했을 시각* = max(l, r) 보다도,
+        실은 state_data = concat(left, right) 가 잘 정렬되어 있다는 보장의 lower bound
+        는 min(l, r) (이전 sample 이라도 양쪽 다 도착했음). 보수적 선택.
+        """
+        l = int(self.left_state_recv_ts)
+        r = int(self.right_state_recv_ts)
+        if l <= 0 or r <= 0:
+            return max(l, r)  # 아직 한쪽만 도착한 경우엔 그쪽 ts 라도 반환
+        return min(l, r)
 
     def ctrl_dual_hand(self, left_q_target, right_q_target):
         """left/right 7-vector(rad, hardware order) -> DDS publish."""
