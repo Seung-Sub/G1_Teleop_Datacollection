@@ -31,7 +31,7 @@ from sharedmemory.shmManager import SharedMemoryManager
 from sharedmemory.shm_schema import (
     CAMERA, RECORD_TASK_LAYOUT, RECORD_EPISODE_LAYOUT, RECORD_MODE_LAYOUT,
     WORKER_FREQ, ROBOT_ACTION, ROBOT_OBS, WORKSPACE_MASK,
-    TELEOP_CONFIG, CAMERA_MAPPING_INV,
+    TELEOP_CONFIG, CAMERA_MAPPING_INV, HAND_MAPPING_INV,
     TELEVISION, QUEST_CONTROLLER,
 )
 
@@ -75,17 +75,19 @@ def worker_record(shared_event, shm_name, shared_lock):
     television_shm     = attach("television_shm",     TELEVISION,            "television_lock")
     controller_shm     = attach("quest_controller_shm", QUEST_CONTROLLER,    "quest_controller_lock")
 
-    # ── camera_type (TELEOP_CONFIG SHM 의 1회 기록 값 참고) ----------
+    # ── camera_type + hand_type (TELEOP_CONFIG SHM 의 1회 기록 값) ----------
     camera_type_str = "zed"
+    hand_type_str   = "inspire"
     if teleop_config_shm is not None:
         try:
             cfg = teleop_config_shm.read_data()
             camera_type_str = CAMERA_MAPPING_INV.get(int(cfg["camera_type"].item()), "zed")
+            hand_type_str   = HAND_MAPPING_INV.get(int(cfg["hand_type"].item()),     "inspire")
         except Exception as e:
             logger_mp.warning(f"[Record] teleop_config 읽기 실패: {e}")
     use_zed       = (camera_type_str == "zed")
     use_realsense = (camera_type_str == "realsense")
-    logger_mp.info(f"[Record] camera_type={camera_type_str} (use_zed={use_zed}, use_realsense={use_realsense})")
+    logger_mp.info(f"[Record] camera_type={camera_type_str} (use_zed={use_zed}, use_realsense={use_realsense}) hand_type={hand_type_str}")
 
     # ── 외부 루프 주파수 (FSM 폴링용 — 데이터 수집 thread 는 collectors 가 별도 thread 로 처리)
     outer_hz = 20.0
@@ -135,6 +137,7 @@ def worker_record(shared_event, shm_name, shared_lock):
             use_zed=use_zed,
             use_realsense=use_realsense,
             output_hz=DEFAULT_OUTPUT_HZ,
+            hand_type=hand_type_str,   # Phase K6: hand 종류별 hand DOF truncation
         )
 
     def _stop_collectors_discard() -> None:

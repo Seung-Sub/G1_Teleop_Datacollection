@@ -1,4 +1,5 @@
 {
+    "_comment": "DEPRECATED — Phase K6 (P1-8) 이후 hand 종류별 modality_inspire.json / modality_dex3.json 사용. 본 파일은 backward-compat 용으로만 유지 (Inspire 31D 동일).",
     "state": {
         "waist": {
             "start": 0,

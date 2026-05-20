@@ -1,4 +1,4 @@
-"""Record-side collectors + alignment + save helpers (Phase D).
+"""Record-side collectors + alignment + save helpers (Phase D / K6 확장).
 
 `RecordCollectors` spawns one background thread per SHM and pushes
 (ts, payload) tuples into per-substream RawStreamBuffer. On
@@ -27,6 +27,7 @@ import numpy as np
 
 from utils.raw_stream import RawStreamBuffer
 from utils.align import interp_to_axis, common_time_axis
+from utils.record_config import BASE_FOLDER
 
 import logging_mp
 logger_mp = logging_mp.get_logger(__name__)
@@ -35,6 +36,47 @@ logger_mp = logging_mp.get_logger(__name__)
 # 공통 정렬 출력 주파수. 학습 측 modality 가 기대하는 control rate 와 일치시킴
 # (G1 ctrl 50Hz 와 동일). 필요 시 worker_record 가 override 가능.
 DEFAULT_OUTPUT_HZ = 50.0
+
+
+# ============================================================================
+# Phase K6 (P1-8): modality.json hand 종류별 자동 배치
+# ============================================================================
+
+import os as _os
+import shutil as _shutil
+
+_REPO_ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+_MODALITY_SRC = {
+    'inspire': _os.path.join(_REPO_ROOT, 'utils', 'parquet', 'modality_inspire.json'),
+    'dex3':    _os.path.join(_REPO_ROOT, 'utils', 'parquet', 'modality_dex3.json'),
+}
+
+def _ensure_meta_modality(task_name: str, hand_type: str) -> None:
+    """record/<task>/meta/modality.json 에 hand 종류별 modality 파일 복사.
+    이미 존재하면 hand_type 변경 시에만 갱신 (사용자 수동 편집 보존)."""
+    src = _MODALITY_SRC.get(hand_type)
+    if src is None or not _os.path.exists(src):
+        logger_mp.warning(f"[Record] modality src not found for hand_type={hand_type}: {src}")
+        return
+    dst_dir = _os.path.join(BASE_FOLDER, task_name, 'meta')
+    _os.makedirs(dst_dir, exist_ok=True)
+    dst = _os.path.join(dst_dir, 'modality.json')
+    if _os.path.exists(dst):
+        # 같은 hand_type 이면 skip. 다르면 백업 후 갱신.
+        try:
+            with open(dst) as f:
+                import json as _json
+                cur = _json.load(f)
+            cur_dim = int(cur.get('state', {}).get('right_hand', {}).get('end', 0))
+            new_dim = 33 if hand_type == 'dex3' else 31
+            if cur_dim == new_dim:
+                return  # 이미 정확
+        except Exception:
+            pass
+        _shutil.copyfile(dst, dst + '.bak')
+        logger_mp.info(f"[Record] modality.json 갱신 (이전 → .bak): hand_type={hand_type}")
+    _shutil.copyfile(src, dst)
+    logger_mp.info(f"[Record] modality.json 배치: {dst} (hand_type={hand_type})")
 
 
 class RecordCollectors:
@@ -203,6 +245,7 @@ def align_and_save_episode(
     use_zed: bool,
     use_realsense: bool,
     output_hz: float = DEFAULT_OUTPUT_HZ,
+    hand_type: str = 'inspire',
 ) -> bool:
     """Build common axis, interpolate every stream onto it, save parquet+mp4.
 
@@ -255,11 +298,22 @@ def align_and_save_episode(
     rs_frames        = _zoh_pick(ts_cr, p_cr, 'frame', ts_axis) if use_realsense else [None]*n
 
     # ---- Save parquet (LeRobot v2.1 호환 구조 유지) ----------------------
+    # Phase K6 (P1-8): hand 종류에 따라 hand DOF 를 12 (Inspire) 또는 14 (DEX3) 로
+    # truncate. modality.json 의 left_hand/right_hand 범위 (Inspire=6+6 / DEX3=7+7)
+    # 와 정확히 일치하도록 저장. SHM 의 obs_hand/action_hand 는 항상 14D 지만,
+    # Inspire 의 경우 [:12] 만 의미가 있고 나머지 [12:14] 는 0 (worker_hand_ctrl 의
+    # zero-pad). 저장 시 hand_type 따라 분기.
+    if hand_type == 'dex3':
+        hand_dim = 14
+    else:  # inspire (default + backward-compat)
+        hand_dim = 12
     parquet_sink.start_episode(task_name, ep_idx)
-    sensor_zero = np.zeros(12, dtype=np.float32)   # 자리표 (touch 도입 시 확장)
+    sensor_zero = np.zeros(12, dtype=np.float32)   # 자리표 (촉각 toggle 시 확장)
     for k in range(n):
-        state_vec  = np.concatenate([obs_waist[k], obs_head[k], obs_arm[k], obs_hand[k]])
-        action_vec = np.concatenate([act_waist[k], act_head[k], act_arm[k], act_hand[k]])
+        state_vec  = np.concatenate([obs_waist[k], obs_head[k], obs_arm[k],
+                                     obs_hand[k, :hand_dim]])
+        action_vec = np.concatenate([act_waist[k], act_head[k], act_arm[k],
+                                     act_hand[k, :hand_dim]])
         parquet_sink.append(state_vec, sensor_zero, action_vec, t_sec=float(t_sec_axis[k]))
 
     # raw source ts (보간 시 사용된 직전 sample 의 ts)
@@ -278,6 +332,13 @@ def align_and_save_episode(
     if use_zed:       parquet_sink.add_extra_column('raw_ts_camera_zed', _src_ts(ts_cz))
     if use_realsense: parquet_sink.add_extra_column('raw_ts_camera_rs',  _src_ts(ts_cr))
     parquet_sink.close_episode()
+
+    # Phase K6 (P1-8): record/<task>/meta/modality.json 자동 배치 — hand 종류별 분기.
+    # 학습 측이 task-level 메타로 읽도록.
+    try:
+        _ensure_meta_modality(task_name, hand_type)
+    except Exception as e:
+        logger_mp.warning(f"[Record] modality.json 배치 실패: {e}")
 
     # ---- Save mp4 --------------------------------------------------------
     video_sink.start_episode(task_name, ep_idx)

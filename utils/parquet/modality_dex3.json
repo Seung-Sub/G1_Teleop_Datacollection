@@ -1,0 +1,27 @@
+{
+    "_comment": "Unitree DEX3-1 (7+7=14 hand DOF). state/action 총 33D = waist(3) + head(2) + left_arm(7) + right_arm(7) + left_hand(7) + right_hand(7). Phase K6 (P1-8) — hand 종류별 modality 분기. ROBOT_OBS/ACTION SHM 의 obs_hand/action_hand 가 14D 그대로 사용된다.",
+    "state": {
+        "waist":      {"start": 0,  "end": 3},
+        "head":       {"start": 3,  "end": 5},
+        "left_arm":   {"start": 5,  "end": 12},
+        "right_arm":  {"start": 12, "end": 19},
+        "left_hand":  {"start": 19, "end": 26},
+        "right_hand": {"start": 26, "end": 33}
+    },
+    "action": {
+        "waist":      {"start": 0,  "end": 3},
+        "head":       {"start": 3,  "end": 5},
+        "left_arm":   {"start": 5,  "end": 12},
+        "right_arm":  {"start": 12, "end": 19},
+        "left_hand":  {"start": 19, "end": 26},
+        "right_hand": {"start": 26, "end": 33}
+    },
+    "video": {
+        "ego":     {"original_key": "observation.images.ego"},
+        "wrist_l": {"original_key": "observation.images.wrist_l"},
+        "wrist_r": {"original_key": "observation.images.wrist_r"}
+    },
+    "annotation": {
+        "human.task_description": {"original_key": "task_index"}
+    }
+}

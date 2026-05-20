@@ -1,0 +1,27 @@
+{
+    "_comment": "Inspire RH56 (6+6=12 hand DOF). state/action 총 31D = waist(3) + head(2) + left_arm(7) + right_arm(7) + left_hand(6) + right_hand(6). Phase K6 (P1-8) — hand 종류별 modality 분기. ROBOT_OBS/ACTION SHM 의 obs_hand/action_hand 는 항상 14D 지만, Inspire 사용 시 실제 의미 있는 값은 앞 12D 만이므로 LeRobot 저장 시점에 state_vec/action_vec 의 hand 부분을 12 로 truncate 해야 한다 (utils/record_collectors.py 의 align_and_save_episode 에서 hand_type 기반 분기).",
+    "state": {
+        "waist":      {"start": 0,  "end": 3},
+        "head":       {"start": 3,  "end": 5},
+        "left_arm":   {"start": 5,  "end": 12},
+        "right_arm":  {"start": 12, "end": 19},
+        "left_hand":  {"start": 19, "end": 25},
+        "right_hand": {"start": 25, "end": 31}
+    },
+    "action": {
+        "waist":      {"start": 0,  "end": 3},
+        "head":       {"start": 3,  "end": 5},
+        "left_arm":   {"start": 5,  "end": 12},
+        "right_arm":  {"start": 12, "end": 19},
+        "left_hand":  {"start": 19, "end": 25},
+        "right_hand": {"start": 25, "end": 31}
+    },
+    "video": {
+        "ego":     {"original_key": "observation.images.ego"},
+        "wrist_l": {"original_key": "observation.images.wrist_l"},
+        "wrist_r": {"original_key": "observation.images.wrist_r"}
+    },
+    "annotation": {
+        "human.task_description": {"original_key": "task_index"}
+    }
+}
