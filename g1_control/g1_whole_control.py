@@ -588,15 +588,21 @@ class G1_29_ArmController:
         total_time = 2.0
         steps = int(total_time / self.control_dt)
 
-        # 현재 각도 읽기
+        # Phase N 이후 G1_29_JointIndex 에 motion mode 의 arm_sdk weight bit (id 29)
+        # 와 unused slot (30~34) 이 추가되어 enum 총 길이 35. 하지만 hoist 모드의
+        # init/default_pos 는 실 G1-29 본체의 진짜 29 joint (id 0..28) 만 명령해야
+        # 한다 (default_dof_pos 도 length 29, 30~34 motor 는 G1-29 본체 미존재).
+        real_joints = list(G1_29_JointIndex)[:29]
+
+        # 현재 각도 읽기 (실 29 joint 만)
         init_pos = np.array(
-            [self.lowstate_buffer.GetData().motor_state[i].q for i in G1_29_JointIndex],
+            [self.lowstate_buffer.GetData().motor_state[i].q for i in real_joints],
             dtype=np.float32
         )
 
         for step in range(steps + 1):
             alpha = step / steps         # 0 → 1 로 선형 증가
-            for idx, motor_id in enumerate(G1_29_JointIndex):
+            for idx, motor_id in enumerate(real_joints):
                 target_q = init_pos[idx] * (1 - alpha) + self.default_dof_pos[idx] * alpha
                 self.msg.motor_cmd[motor_id].mode = 1
                 self.msg.motor_cmd[motor_id].q  = float(target_q)
@@ -613,8 +619,10 @@ class G1_29_ArmController:
     def default_pos_state(self) -> None:
         """기본 자세를 유지하며 A 버튼이 눌릴 때까지 대기."""
         print("In default position state. Press A to end initial setting.")
+        # move_to_default_pos 와 동일 — 실 29 joint 만 명령 (Phase N 이후 enum 길이 35).
+        real_joints = list(G1_29_JointIndex)[:29]
         while self.remote.button[KeyMap.A] != 1:
-            for idx, motor_id in enumerate(G1_29_JointIndex):
+            for idx, motor_id in enumerate(real_joints):
                 self.msg.motor_cmd[motor_id].mode = 1
                 self.msg.motor_cmd[motor_id].q  = float(self.default_dof_pos[idx])
                 self.msg.motor_cmd[motor_id].dq = 0.0
