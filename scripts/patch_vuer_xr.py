@@ -55,6 +55,13 @@ PATCH_RULES = [
     ("handTracking:r=!KSe()",               "handTracking:r=!1"),
     ("handTracking:r=!ZSe()",               "handTracking:r=!1"),
     ("handTracking:te=!isAppleVisionPro()", "handTracking:te=!1"),
+    # WebSocket URL bug fix — HTTPS branch 가 hostname 뒤에 port 누락:
+    # 원본: `wss://${window.location.hostname}` (port 없음 → 443 default → 우리 8012 서버 못 만남)
+    # 수정: `wss://${window.location.hostname}:${window.location.port}` (현재 페이지 port 그대로)
+    # 사용자가 `https://127.0.0.1:8012` 또는 `https://<ip>:8012` 어느 쪽으로 와도 항상 같은 port 로
+    # WebSocket 연결 시도 → 우리 서버 hit.
+    ("`wss://${window.location.hostname}`",
+     "`wss://${window.location.hostname}:${window.location.port}`"),
 ]
 
 
