@@ -599,6 +599,27 @@ class TeleopUI(QtWidgets.QMainWindow):
     def ZED_view_toggle_button(self):
         if hasattr(self, 'zed_view_toggle_button'):
             self.zed_view_toggle_button.clicked.connect(self.toggle_zed_view)
+            # .ui 의 옛 기본값 (text='ZED Left View', 초록 #4CAF50) 을 현재 운용에 맞게
+            # override. 초기 text = current_view_role 기반 — 첫 화면에서 'ZED' 잔존
+            # 표시되는 버그 해결. 색은 blue palette (Material Blue 500/600/700) 로 통일.
+            roles = self.active_camera_roles
+            init_text = f"view: {self.current_view_role}" if self.current_view_role else "view: (none)"
+            self.zed_view_toggle_button.setText(init_text)
+            self.zed_view_toggle_button.setStyleSheet("""
+                QPushButton {
+                    background-color: #2196F3;
+                    color: white;
+                    border: 2px solid #2196F3;
+                    border-radius: 5px;
+                    padding: 8px;
+                }
+                QPushButton:hover {
+                    background-color: #1E88E5;
+                }
+                QPushButton:pressed {
+                    background-color: #1976D2;
+                }
+            """)
 
 
     def toggle_zed_view(self):
