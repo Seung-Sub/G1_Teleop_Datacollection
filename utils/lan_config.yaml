@@ -1,15 +1,6 @@
-# ansur@ansur:~$ ifconfig
+# 새 데스크톱 (2026-05-21):
+#   $ ip -br a
+#   enp129s0  UP  192.168.123.162/24   ← G1 서브넷 (G1 jetson = 192.168.123.164)
+# ping 192.168.123.164 → 0% packet loss, <0.2ms.
 
-# enp0s31f6: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500
-#         inet 192.168.123.162  netmask 255.255.255.0  broadcast 192.168.123.255
-#         inet6 fe80::18d3:9850:99fe:1b41  prefixlen 64  scopeid 0x20<link>
-#         ether a8:a1:59:f1:bd:f5  txqueuelen 1000  (Ethernet)
-#         RX packets 1212734  bytes 1731620734 (1.7 GB)
-#         RX errors 0  dropped 0  overruns 0  frame 0
-#         TX packets 16054  bytes 1677446 (1.6 MB)
-#         TX errors 0  dropped 0 overruns 0  carrier 0  collisions 0
-
-
-
-
-network_interface: enx00e04c6804e2
+network_interface: enp129s0
