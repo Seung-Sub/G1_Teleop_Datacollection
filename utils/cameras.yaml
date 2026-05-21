@@ -10,23 +10,25 @@
 # 본 파일이 비어 있고 main.py --cameras-config 가 지정되지 않으면 main.py 는
 # `--camera <serial|auto|none>` 단일 카메라 모드로 동작 (ego 슬롯 1개).
 #
-# 예시 (실 운용에 맞춰 serial 채워 사용):
+# -----------------------------------------------------------------------------
+# 2026-05-21 새 데스크톱 환경 — 검출된 RealSense 3대:
+#   D455 serial=046322250265  fw=5.17.0.10  USB 3.2 (port 2-5) → ego (정면)
+#   D405 serial=335122272533  fw=5.15.0.2   USB 3.2 (port 2-4)
+#   D405 serial=409122272167  fw=5.15.1.55  USB 3.2 (port 2-6)
 #
-# cameras:
-#   - role: ego        # 정면 / 머리 시점 (D435i)
-#     type: realsense
-#     serial: "AUTO_OR_FILL_HERE"
-#     fps: 30
-#     resolution: [640, 480]
-#   - role: wrist_l    # 왼손목 (D405)
-#     type: realsense
-#     serial: "AUTO_OR_FILL_HERE"
-#     fps: 30
-#     resolution: [640, 480]
-#   - role: wrist_r    # 오른손목 (D405)
-#     type: realsense
-#     serial: "AUTO_OR_FILL_HERE"
-#     fps: 30
-#     resolution: [640, 480]
+# ⚠️ TODO (wrist L/R 매핑 잠정):
+#   현재 D405 두 대의 좌/우 매핑은 임시 (335...→wrist_l, 409...→wrist_r).
+#   실제 손목에 영구 고정 부착 후, STEP 6 GUI 영상 확인으로 좌우 검증 → 부적합 시
+#   아래 두 serial 줄을 swap. 이 주석을 그 시점에 갱신.
+# -----------------------------------------------------------------------------
 
-cameras: []
+cameras:
+  - role: ego
+    type: realsense
+    serial: "046322250265"   # D455 — 작업공간 정면 시점 (정책 주 시점)
+  - role: wrist_l
+    type: realsense
+    serial: "335122272533"   # D405 — 잠정 좌 (TODO: 실 고정 후 확인)
+  - role: wrist_r
+    type: realsense
+    serial: "409122272167"   # D405 — 잠정 우 (TODO: 실 고정 후 확인)
