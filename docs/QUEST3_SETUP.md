@@ -20,9 +20,15 @@ Windows / Mac 전용 PCVR 게이밍 앱입니다. Linux 에는 설치되지 않�
 ### 1-1. `adb` 설치
 ```bash
 sudo apt-get update
-sudo apt-get install -y android-tools-adb
+sudo apt-get install -y adb     # jammy 이상 — 패키지명이 'adb' (옛 'android-tools-adb' 는 obsolete)
 adb version    # 1.0.41 이상이면 OK
 ```
+
+⚠️ Ubuntu 22.04 (jammy) 부터 `android-tools-adb` 패키지가 `adb` 로 rebrand 됨.
+   `apt-get install android-tools-adb` 입력하면 "후보 (없음)" 으로 거절됨.
+   또한 `apt-get update && apt-get install` 에서 외부 저장소 GPG/TLS 오류로
+   update 가 exit 100 반환하면 `&&` 가 install 단계를 skip 하므로, 인덱스가
+   이미 캐시에 있으면 update 없이 install 만 단독 실행해도 됨.
 
 ### 1-2. udev rule (root 없이 adb 가능)
 ```bash

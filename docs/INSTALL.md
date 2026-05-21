@@ -233,13 +233,17 @@ OS 와 conda env 와 별개로 Quest 3 헤드셋 안의 Developer Mode + USB Deb
 
 요약:
 ```bash
-sudo apt-get install -y android-tools-adb
+# jammy 이상 — 패키지명이 'adb' (옛 'android-tools-adb' 는 obsolete)
+sudo apt-get install -y adb
 sudo tee /etc/udev/rules.d/51-android.rules > /dev/null <<'EOF'
 SUBSYSTEM=="usb", ATTR{idVendor}=="2833", MODE="0666", GROUP="plugdev"
 EOF
 sudo udevadm control --reload-rules && sudo udevadm trigger
 sudo usermod -aG plugdev $USER
 # 그룹 변경 반영을 위해 로그아웃 후 재로그인
+# udev rule 작성 전에 이미 Quest 가 꽂혀 있었다면, USB 케이블을 한 번 뽑았다 다시 연결해
+# 새 add 이벤트로 rule 이 적용되도록 한다. (`udevadm trigger` 만으로는 이미 attached 된
+# 디바이스의 노드 권한이 안 바뀌는 경우가 있음.)
 ```
 
 Quest 3 헤드셋:
