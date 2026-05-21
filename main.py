@@ -16,6 +16,9 @@ it will be re-introduced as a separate `evaluate.py` (Phase 6).
 import sys
 import os
 import time
+import errno
+import atexit
+import signal
 import argparse
 import multiprocessing as mp
 from multiprocessing import Event, Lock, Process
@@ -468,9 +471,41 @@ def wait_for_shutdown(event):
 
 
 def cleanup(processes, managers):
-    for p in processes:
-        p.join(timeout=2)
+    """Graceful 3단 종료: join(2s) → terminate(1s) → kill, 그 다음 SHM unlink.
 
+    이전엔 join(timeout=2) 만 했어서 worker 가 shutdown event 를 못 봤거나 hang
+    상태일 때 좀비 + SHM 누수가 남았다. 이제 모든 경우에 깨끗이 정리.
+    """
+    # 1) graceful — workers 가 shutdown event 보고 자기 정리
+    for p in processes:
+        try:
+            p.join(timeout=2)
+        except Exception:
+            pass
+
+    # 2) SIGTERM (terminate) 후 1초 추가 대기
+    for p in processes:
+        if p.is_alive():
+            try:
+                p.terminate()
+            except Exception:
+                pass
+    for p in processes:
+        if p.is_alive():
+            try:
+                p.join(timeout=1)
+            except Exception:
+                pass
+
+    # 3) SIGKILL — 그래도 안 죽으면 강제
+    for p in processes:
+        if p.is_alive():
+            try:
+                p.kill()
+            except Exception:
+                pass
+
+    # SHM unlink (owner) / close (non-owner)
     for mgr in managers.values():
         if getattr(mgr, '_owner', False):
             try:
@@ -481,7 +516,122 @@ def cleanup(processes, managers):
             mgr.worker_close()
 
 
+# -----------------------------------------------------------------------------
+# Pre-flight cleanup — 이전 run 잔존물 자동 정리.
+# 매 main.py 실행 시 호출 (main() 의 가장 첫 단계). 사용자가 종료 절차를 매번
+# 신경쓸 필요 없도록, 다음을 자동 수행:
+#   1) /tmp/teleop_main.pid 가 가리키는 stale main.py process group 을 정리
+#      (그 cmdline 이 우리 main.py 인지 검증 후에만 kill — 다른 사용자 process
+#       오살(誤殺) 방지).
+#   2) 우리 워크스페이스가 owner 인 알려진 SHM 이름들을 /dev/shm 에서 unlink.
+#      (SHM_CONFIG 정적 항목 + 카메라 role-keyed 동적 항목 다 포함.)
+# -----------------------------------------------------------------------------
+PIDFILE = "/tmp/teleop_main.pid"
+
+# 카메라 role-keyed SHM 은 main() 안에서 SHM_CONFIG 에 동적 추가되지만, preflight
+# 는 그 전에 돌아 SHM_CONFIG 에 없는 것까지 일괄 청소해야 함. 그래서 명시 나열.
+_ROLE_SHM_NAMES = ['rs_ego_shm', 'rs_wrist_l_shm', 'rs_wrist_r_shm']
+
+
+def _known_shm_names():
+    static = [v[1] for v in SHM_CONFIG.values()]
+    return static + _ROLE_SHM_NAMES
+
+
+def _proc_is_our_main(pid: int) -> bool:
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            cmd = f.read().decode("utf-8", "ignore")
+        return ("python" in cmd) and ("main.py" in cmd)
+    except (FileNotFoundError, ProcessLookupError, PermissionError):
+        return False
+
+
+def preflight_cleanup():
+    """이전 main.py run 잔존물 (process + SHM) 정리.
+
+    호출 시점: main() 최상단 (SHM owner-create 직전).
+    """
+    # 1) stale process group kill
+    killed = False
+    if os.path.isfile(PIDFILE):
+        prev = None
+        try:
+            with open(PIDFILE) as f:
+                prev = int(f.read().strip())
+        except Exception:
+            prev = None
+        if prev and _proc_is_our_main(prev):
+            try:
+                pgid = os.getpgid(prev)
+                print(f"[preflight] killing stale main.py pgid={pgid} (pid={prev})",
+                      file=sys.stderr)
+                os.killpg(pgid, signal.SIGTERM)
+                time.sleep(1.5)
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                killed = True
+            except (ProcessLookupError, PermissionError) as e:
+                print(f"[preflight] killpg failed: {e}", file=sys.stderr)
+        try:
+            os.remove(PIDFILE)
+        except FileNotFoundError:
+            pass
+
+    # 2) stale SHM unlink
+    unlinked = []
+    for name in _known_shm_names():
+        path = f"/dev/shm/{name}"
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+                unlinked.append(name)
+            except OSError as e:
+                if e.errno != errno.ENOENT:
+                    print(f"[preflight] unlink {path} failed: {e}", file=sys.stderr)
+    if unlinked:
+        sample = unlinked if len(unlinked) <= 8 else unlinked[:8] + ['...']
+        print(f"[preflight] unlinked {len(unlinked)} stale shm: {sample}",
+              file=sys.stderr)
+    if killed or unlinked:
+        # 잠깐 텀 — kill 직후 OS 가 fd close 다 처리하도록.
+        time.sleep(0.3)
+
+
+def _write_pidfile():
+    """이번 run 의 PID 를 PIDFILE 에 기록 + atexit 으로 자동 제거."""
+    try:
+        with open(PIDFILE, "w") as f:
+            f.write(str(os.getpid()))
+    except OSError as e:
+        print(f"[preflight] pidfile write failed: {e}", file=sys.stderr)
+        return
+
+    def _remove_pidfile():
+        try:
+            os.remove(PIDFILE)
+        except FileNotFoundError:
+            pass
+    atexit.register(_remove_pidfile)
+
+
+def _install_signal_handlers(events):
+    """SIGTERM 시에도 (Ctrl-C 와 동일하게) graceful shutdown 트리거."""
+    def _on_sig(signum, frame):
+        events['shutdown'].set()
+    try:
+        signal.signal(signal.SIGTERM, _on_sig)
+    except Exception:
+        pass  # 일부 환경(예: thread 안) 에서는 등록 불가, 무시
+
+
 def main():
+    # 이전 run 잔존물 자동 정리 (process + SHM). 사용자가 매번 신경쓸 필요 없게.
+    preflight_cleanup()
+    _write_pidfile()
+
     args      = parse_args()
 
     # Phase N — lower_body / vr_input / waist / gait 안전 검증.
@@ -511,6 +661,8 @@ def main():
     locks     = create_locks()
     shm_names = get_shm_names()
     managers  = create_shm_managers(locks)
+    # SIGTERM (kill <pid>) 도 SIGINT (Ctrl-C) 와 동일하게 graceful shutdown.
+    _install_signal_handlers(events)
 
     # --no-robot: set_g1/set_hand 사전 set 으로 worker_g1_ik 가 FSM RUN 진입
     if args.no_robot:
@@ -538,6 +690,11 @@ def main():
 
     wait_for_shutdown(events['shutdown'])
     cleanup(processes, managers)
+    # PIDFILE 은 atexit 으로 이미 제거 등록되어 있음. 명시적으로 한 번 더.
+    try:
+        os.remove(PIDFILE)
+    except FileNotFoundError:
+        pass
     sys.exit(0)
 
 

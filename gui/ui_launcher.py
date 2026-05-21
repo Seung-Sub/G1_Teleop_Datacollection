@@ -1170,8 +1170,11 @@ class TeleopUI(QtWidgets.QMainWindow):
                     marker_corners_flat = mask_data.get("marker_corners_left", None)
 
                     # 실제 마스크 적용 (작업 공간만 표시)
+                    # 가드: workspace_mask SHM 이 비어 있을 때 (RealSense 단독 운용 — ZED+ArUco
+                    # workflow 가 mask 를 채우지 않음) bitwise_and(img, img, mask=zeros) 는
+                    # 영상을 통째로 0 으로 만든다. 마스크에 non-zero 픽셀이 있을 때만 적용.
                     mask_flat = mask_left_flat
-                    if mask_flat is not None:
+                    if mask_flat is not None and mask_flat.any():
                         mask = mask_flat.reshape(480, 640).astype(np.uint8)
                         if mask.shape[:2] == zed_img.shape[:2]:
                             zed_img = cv2.bitwise_and(zed_img, zed_img, mask=mask)
