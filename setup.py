@@ -8,8 +8,10 @@ from setuptools import setup, find_packages
 
 # --------------- 기본 의존성 ---------------
 # 사용자가 주신 버전/범위를 최대한 반영했습니다.
+# 주의: aiortc 는 코드에서 import 안 함 (workspace 가 vuer.addons.camera_rtc 미사용).
+#       Python 3.8 에서 aiortc==1.8.0 → av<12 → cp38 wheel 없어 ffmpeg dev 빌드 필요.
+#       2026-05 dead-dep 으로 판단해 제거.
 base_requires = [
-    "aiortc==1.8.0",
     "opencv-contrib-python==4.10.0.82",
     "params-proto==2.12.1",
     "pytransform3d==3.5.0",

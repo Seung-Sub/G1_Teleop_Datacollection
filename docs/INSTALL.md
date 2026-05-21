@@ -42,11 +42,13 @@ which python pip    # → /home/<user>/miniconda3/envs/teleop/bin/...
 conda install -c conda-forge -y pinocchio casadi
 # → pinocchio 3.2.0 / casadi 3.6.5 (2026-05 시점)
 
-# pip: numpy<2 + scipy + opencv + 데이터 IO
+# pip: numpy<2 + scipy + opencv-contrib + 데이터 IO
+# 주의: opencv-contrib-python 사용 (워크스페이스 코드가 cv2.aruco 호출 — workers/worker_zed.py).
+#       setup.py 가 같은 패키지를 ==4.10.0.82 로 pin 해 §6 단계에서 재설치됨.
 pip install \
     'numpy<2' \
     scipy \
-    'opencv-python<4.11' \
+    'opencv-contrib-python<4.11' \
     pyarrow \
     pandas \
     pyyaml \
@@ -72,11 +74,17 @@ syntax 를 사용해 Python 3.8 에서 `TypeError: 'type' object is not subscrip
 
 ### 3-1. Vuer + params_proto 설치
 ```bash
-pip install --no-deps 'vuer==0.0.60' 'params_proto'
+# params_proto 3.x 부터 vuer 0.0.60 이 필요로 하는 `Flag` symbol 이 제거되었으므로
+# 2.x 라인 (마지막은 2.13.2) 으로 pin. 2.x 는 Python 3.8 PEP 604 이슈도 없어
+# §3-2 monkey-patch 가 불필요.
+pip install --no-deps 'vuer==0.0.60' 'params_proto>=2.12,<3.0'
 pip install aiohttp aiohttp-cors websockets msgpack dotvar pillow
 ```
 
-### 3-2. params_proto monkey-patch (Python 3.8 호환)
+### 3-2. (옛 절차) params_proto monkey-patch
+§3-1 에서 2.x 로 pin 하면 **불필요**. 만약 3.x 로 두면 Python 3.8 에서
+`TypeError: 'type' object is not subscriptable` 가 envvar.py 에서 발생 — 그 경우에만
+다음 패치를 적용한다.
 ```bash
 ENVVAR_FILE=$(python -c "
 import params_proto, os
@@ -129,7 +137,10 @@ pip install cyclonedds
 - inspire_sdkpy 는 Inspire 공식 repo 에서 clone + pip install.
 - 미사용 시 (DEX3 만) skip 가능.
 
-### 4-4. Dynamixel SDK (`--head dxl` 사용 시)
+### 4-4. Dynamixel SDK — **필수** (운용 모드 무관)
+`workers/worker_g1_ctrl.py` 가 `g1_control.g1_head_dynamixel` 을 static import →
+`dynamixel_sdk` 가 없으면 worker import 단계에서 실패. `--head off` 운용이라도 SDK 자체는
+설치되어 있어야 한다.
 ```bash
 pip install dynamixel_sdk
 ```
@@ -205,7 +216,13 @@ cd /path/to/G1_Teleoperation
 pip install -e .
 ```
 
-`setup.py` 가 entry_points 만 등록 (의존성 없음). 위에서 모두 설치했으므로 OK.
+`setup.py` 에는 `install_requires` 가 등록되어 있어 이 단계에서 다음 패키지들이 추가
+설치된다 (수십 분 소요): torch==2.3.0, torchvision==0.18.0, scikit-learn==1.3.2,
+nlopt, anytree, trimesh, pytransform3d, h5py, glfw, pyqtgraph, matplotlib,
+opencv-contrib-python==4.10.0.82 (§2 와 동일 패키지 — pip 가 같은 자리로 재설치),
+`params-proto==2.12.1` 로 다운그레이드됨 (2.12.1 에도 `Flag` 가 있어 vuer 정상 동작).
+
+`aiortc` 는 코드 어디서도 import 안 되는 dead-dep 이라 `setup.py` 에서 제거 (2026-05).
 
 ---
 
@@ -267,34 +284,44 @@ all offline checks passed — codebase + env integrity OK.
 
 ---
 
-## 부록 A — 2026-05-20 검증된 정확한 버전
+## 부록 A — 2026-05-21 새 머신 재검증된 정확한 버전
 
 ```
 python                    3.8.20
 numpy                     1.24.4
 scipy                     1.10.1
-opencv-python             4.10.0.84
+opencv-contrib-python     4.10.0.82  (setup.py pin — cv2.aruco 필요)
 pandas                    2.0.3
 pyarrow                   17.0.0
 PyYAML                    6.0.3
 imageio                   2.35.1
+imageio-ffmpeg            0.5.1
 PyQt5                     5.15.x
 pinocchio                 3.2.0  (conda-forge)
 casadi                    3.6.5  (conda-forge)
 vuer                      0.0.60 (--no-deps)
-params_proto              latest + monkey-patch
+params_proto              2.12.1 (setup.py 가 ==2.12.1 로 pin)
 aiohttp                   3.10.11
 aiohttp-cors              0.7.0
 websockets                13.1
 msgpack                   1.1.1
 dotvar                    0.1.1
 pillow                    10.4.0
-cyclonedds                latest
+cyclonedds                0.10.2 (unitree_sdk2py dep)
 unitree_sdk2py            github HEAD (pip install -e)
 logging-mp                0.2.1 + alias
-dynamixel_sdk             latest (옵션)
-pyrealsense2              latest (옵션)
-pyzed.sl                  ZED SDK 5.x (옵션)
+dynamixel_sdk             4.0.5  (필수 — worker_g1_ctrl static import)
+pyrealsense2              2.55.x (옵션 — RealSense)
+pyzed.sl                  ZED SDK 5.x (옵션 — ZED)
+torch                     2.3.0+cu121 (setup.py)
+torchvision               0.18.0      (setup.py)
+scikit-learn              1.3.2       (setup.py)
+nlopt                     2.7.1       (setup.py)
+anytree                   2.12.1      (setup.py)
+trimesh                   4.12.x      (setup.py)
+pytransform3d             3.5.0       (setup.py)
+h5py                      3.11.0      (setup.py)
+glfw, pyqtgraph 0.13.3, matplotlib 3.7.5 (setup.py)
 ```
 
 ## 부록 B — 자주 만나는 오류
