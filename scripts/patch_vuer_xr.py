@@ -39,11 +39,17 @@ from pathlib import Path
 CHUNKS_DIR_REL = "lib/python{py_ver}/site-packages/vuer/client_build/assets/chunks"
 
 # 패치 대상 패턴 (find → replace).
-# (1) 명시적 hardcode: HX({...handTracking:!0...}) → handTracking:!1
-# (2) platform-aware default: handTracking:r=!KSe() (또는 다른 함수명) → r=!1
+#
+# WebXR session 의 optionalFeatures 에 'hand-tracking' 이 들어가는 건 bX() 함수의
+# default `handTracking:r=!KSe()` (Mac 외 플랫폼에서 r=true). 이것만 false 로 바꾸면
+# WebXR session 에서 hand-tracking feature 가 요청되지 않아 Quest 가 controller
+# 우선 모드로 동작.
+#
+# 반대로 `HX({hand:!0,handTracking:!0})` 의 handTracking 값은 vuer 의 내부 XR
+# store config 에 영향 — 일부 코드 경로에서 CONTROLLER_MOVE event 전파에 필요할
+# 가능성이 있어 건드리지 않는다 (시행착오: 이걸 false 로 바꾸면 controller 가
+# 헤드셋에 보이지만 CONTROLLER_MOVE event 가 server 로 전송되지 않는 부작용 확인).
 PATCH_RULES = [
-    # 가장 직접적: handTracking:!0 → handTracking:!1
-    ("handTracking:!0", "handTracking:!1"),
     # platform-aware default 들 — !XXX() 가 Mac/Apple 체크 함수. Quest 에선 true 가 됨.
     # 함수명은 chunk 별로 다름 (난독화). 일반화 패턴.
     ("handTracking:r=!KSe()",               "handTracking:r=!1"),
