@@ -84,6 +84,23 @@ pip install --no-deps 'vuer==0.0.60' 'params_proto>=2.12,<3.0'
 pip install aiohttp aiohttp-cors websockets msgpack dotvar pillow
 ```
 
+### 3-3. (controller 모드 필수) Vuer WebXR hand-tracking 기본값 OFF
+
+vuer 0.0.60 의 client JS chunk 에 `handTracking:!0` 가 hardcode 되어 있어, Quest 3 의
+WebXR session 진입 시 optionalFeatures 에 `'hand-tracking'` 이 항상 포함됨. Quest 의
+auto-switch 정책상 hands 가 헤드셋 카메라에 보이면 controller input 이 demote 되어
+`--vr-input controller` 모드 운용이 사실상 불가 (헤드셋 안에서 컨트롤러 인식 안 됨).
+
+teleop env 처음 설치 후 한 번 수행:
+```bash
+python scripts/patch_vuer_xr.py disable   # 4 chunk 의 handTracking 기본값을 false 로 패치, .orig 백업
+python scripts/patch_vuer_xr.py status    # 상태 확인 ('PATCHED (handTracking disabled)' 떠야 함)
+```
+
+⚠️ 본 패치 적용 시 `--vr-input hand` 모드는 동작하지 않음 (Quest 가 hand-tracking
+   permission 없이 session 시작 → HAND_MOVE 이벤트 없음). 본 워크스페이스는 controller
+   를 표준 입력으로 사용하므로 무관. 필요시 `python scripts/patch_vuer_xr.py restore`.
+
 ### 3-2. (옛 절차) params_proto monkey-patch
 §3-1 에서 2.x 로 pin 하면 **불필요**. 만약 3.x 로 두면 Python 3.8 에서
 `TypeError: 'type' object is not subscriptable` 가 envvar.py 에서 발생 — 그 경우에만
