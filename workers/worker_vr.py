@@ -19,7 +19,7 @@ import numpy as np
 
 from sharedmemory.shmManager import SharedMemoryManager
 from sharedmemory.shm_schema import (
-    CAMERA, TELEVISION, RECORD_MODE_LAYOUT, WORKER_FREQ, QUEST_CONTROLLER,
+    TELEVISION, RECORD_MODE_LAYOUT, WORKER_FREQ, QUEST_CONTROLLER,
 )
 
 from open_television.tv_wrapper import TeleVisionWrapper
@@ -29,7 +29,11 @@ logger_mp = logging_mp.get_logger(__name__)
 
 
 def worker_vr(shared_event, shm_name, shared_lock, vr_input="hand"):
-    camera_shm           = SharedMemoryManager(CAMERA,             shared_lock["camera_lock"],           shm_name["camera_shm"])
+    # Part5: 표시 경로 정합 — Vuer 가 ego 카메라 (rs_ego_shm, CAMERA_VIEW) 를 attach.
+    # main.py 가 owner-create. cameras=[] (카메라 없음) 시 'rs_ego_shm' 키 미존재
+    # → TeleVision 측 SharedMemoryManager 가 자동으로 owner-create (빈 frame 만) 후
+    # main_image_* 의 frame_left.any()==0 가드로 표시 skip. 즉 worker_vr 자체는 그대로
+    # 동작 (controller pose 채널은 카메라 유무와 독립).
     television_shm       = SharedMemoryManager(TELEVISION,         shared_lock["television_lock"],       shm_name["television_shm"])
     record_mode_shm      = SharedMemoryManager(RECORD_MODE_LAYOUT, shared_lock["record_lock"],           shm_name["record_mode_shm"])
     freq_shm             = SharedMemoryManager(WORKER_FREQ,        shared_lock["freq_lock"],             shm_name["freq_shm"])
@@ -41,7 +45,12 @@ def worker_vr(shared_event, shm_name, shared_lock, vr_input="hand"):
     last_time = next_time
 
     img_shape  = (640, 480, 3)
-    tv_wrapper = TeleVisionWrapper(True, img_shape, shm_name["camera_shm"], vr_input=vr_input)
+    # Part5: TeleVisionWrapper 가 직접 attach 할 SHM 이름 — ego role 의 rs_ego_shm 우선,
+    # 없으면 legacy 'camera_shm' fallback (cameras=[] 일 때).
+    camera_shm_name = shm_name.get("rs_ego_shm", shm_name.get("camera_shm", "rs_ego_shm"))
+    tv_wrapper = TeleVisionWrapper(True, img_shape, camera_shm_name,
+                                   vr_input=vr_input,
+                                   camera_shm_key=camera_shm_name)
 
     home_left_wrist  = None
     home_right_wrist = None
@@ -188,7 +197,6 @@ def worker_vr(shared_event, shm_name, shared_lock, vr_input="hand"):
             next_time = time.perf_counter_ns()
 
     logger_mp.info("[VR] 종료 신호 수신. 종료합니다.")
-    camera_shm.worker_close()
     television_shm.worker_close()
     record_mode_shm.worker_close()
     freq_shm.worker_close()

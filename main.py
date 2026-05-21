@@ -404,10 +404,13 @@ def get_worker_specs(args, events, locks, shm_names):
     # ---- Common: VR / GUI / keyboard --------------------------------
     # worker_vr import는 여기서 (vuer/params-proto 가 argparse 가로채는 것 회피)
     from workers.worker_vr import worker_vr
+    # Part5: GUI 가 표시할 카메라 role 목록 (활성 cameras 의 role). 단일/멀티/없음
+    # 모두 동일 코드 경로. 빈 리스트면 GUI 가 "신호 없음" 표시.
+    active_camera_roles = [c['role'] for c in args.cameras]
     specs += [
         {'target': worker_vr,         'args': (events, shm_names, locks, args.vr_input),
          'name': 'WORKER_VR'},
-        {'target': run_ui,            'args': (events, shm_names, locks),
+        {'target': run_ui,            'args': (events, shm_names, locks, active_camera_roles),
          'name': 'UI'},
         {'target': keyboard_listener, 'args': (events,),
          'name': 'KEYBOARD'},

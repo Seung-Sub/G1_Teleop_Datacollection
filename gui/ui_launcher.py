@@ -16,8 +16,13 @@ from PyQt5.QtWidgets import QApplication
 import subprocess
 
 from sharedmemory.shmManager import SharedMemoryManager
-from sharedmemory.shm_schema import CAMERA, ARUCO_MARKERS, WORKSPACE_MASK, RECORD_TASK_LAYOUT, RECORD_EPISODE_LAYOUT, \
+from sharedmemory.shm_schema import CAMERA_VIEW, ARUCO_MARKERS, WORKSPACE_MASK, RECORD_TASK_LAYOUT, RECORD_EPISODE_LAYOUT, \
     RECORD_MODE_LAYOUT, RIGHT_TOUCH_SENSOR_LAYOUT, LEFT_TOUCH_SENSOR_LAYOUT, WORKER_FREQ,GR00T_TASK_LAYOUT, ROBOT_OBS, ROBOT_ACTION, MASK_CONTROL_LAYOUT
+
+# Part5: main.py 의 ROLE_TO_*_KEY 와 동일 — 표시 경로(GUI)가 CAMERA_VIEW role SHM 을
+# attach 하는 데 사용. 매핑이 갈라지지 않게 main.py 와 같은 값으로 유지.
+ROLE_TO_SHM_KEY  = {'ego': 'rs_ego_shm',  'wrist_l': 'rs_wrist_l_shm',  'wrist_r': 'rs_wrist_r_shm'}
+ROLE_TO_LOCK_KEY = {'ego': 'rs_ego_lock', 'wrist_l': 'rs_wrist_l_lock', 'wrist_r': 'rs_wrist_r_lock'}
 
 
 import pyqtgraph as pg
@@ -33,23 +38,22 @@ APPLY_MASK_IN_GUI = True
 import logging_mp
 logger_mp = logging_mp.get_logger(__name__)
 
-# ZED 뷰 상태
-ZED_VIEW_LEFT = "left"
-ZED_VIEW_REALSENSE = "realsense"
-
-
 class TeleopUI(QtWidgets.QMainWindow):
-    def __init__(self, shared_event, shm_names, shared_lock):
+    def __init__(self, shared_event, shm_names, shared_lock, active_camera_roles=None):
         super().__init__()
         # .ui 파일 로드
- 
+
         # 전달받은 리소스 저장
         self.shared_event = shared_event
         self.shm_name = shm_names
         self.shared_lock = shared_lock
 
-        # 카메라 뷰 상태 초기화 (zed_left 또는 realsense)
-        self.zed_current_view = ZED_VIEW_LEFT
+        # Part5: 활성 카메라 role 리스트 (main.py 가 args.cameras 기반으로 전달).
+        # 단일 카메라 → 길이 1, 멀티 → 토글 버튼이 순환. 빈 리스트 → "신호 없음".
+        self.active_camera_roles = list(active_camera_roles) if active_camera_roles else []
+        self.current_view_role = self.active_camera_roles[0] if self.active_camera_roles else None
+        # role 별 마지막 프레임 캐시 (frame miss 시 잔상 유지)
+        self._prev_frames = {}
         
         # 타이머 관련 변수 초기화 (그래프가 비활성화되어도 필요)
         self.start_time = time.time()
@@ -236,7 +240,20 @@ class TeleopUI(QtWidgets.QMainWindow):
         lock = self.shared_lock
         names = self.shm_name
 
-        self.camera_shm         = SharedMemoryManager(CAMERA, lock["camera_lock"], names["camera_shm"])
+        # Part5: 표시 경로 정합 — 데이터 경로(CAMERA_VIEW role SHM) 그대로 attach.
+        # 활성 role 별로 SharedMemoryManager 1개씩. 카메라 0대면 view_shms = {}.
+        self.view_shms = {}
+        for role in self.active_camera_roles:
+            shm_key  = ROLE_TO_SHM_KEY.get(role)
+            lock_key = ROLE_TO_LOCK_KEY.get(role)
+            if shm_key is None or shm_key not in names or lock_key not in lock:
+                logger_mp.warning(f"[GUI] role={role} 의 SHM 키 미발견 — 표시 skip.")
+                continue
+            try:
+                self.view_shms[role] = SharedMemoryManager(CAMERA_VIEW, lock[lock_key], names[shm_key])
+            except Exception as e:
+                logger_mp.warning(f"[GUI] role={role} CAMERA_VIEW attach 실패: {e}")
+
         self.aruco_shm          = SharedMemoryManager(ARUCO_MARKERS, lock["aruco_lock"], names["aruco_shm"])
         self.workspace_mask_shm = SharedMemoryManager(WORKSPACE_MASK, lock["workspace_mask_lock"], names["workspace_mask_shm"])
         # television_shm 제거됨 (POSE INFO 기능 제거)
@@ -585,15 +602,24 @@ class TeleopUI(QtWidgets.QMainWindow):
 
 
     def toggle_zed_view(self):
-        """카메라 뷰를 zed_left ↔ realsense로 전환"""
-        if self.zed_current_view == ZED_VIEW_LEFT:
-            self.zed_current_view = ZED_VIEW_REALSENSE
-            self.zed_view_toggle_button.setText("RealSense View")
-            print("[GUI] 카메라 뷰: RealSense로 전환")
-        else:
-            self.zed_current_view = ZED_VIEW_LEFT
-            self.zed_view_toggle_button.setText("ZED Left View")
-            print("[GUI] 카메라 뷰: ZED Left로 전환")
+        """Part5: 활성 카메라 role 들을 순환 (ego → wrist_l → wrist_r → ego ...).
+        UI 라벨/버튼은 그대로 유지하고 role 만 전환 — .ui 수정 없이 멀티 카메라 지원."""
+        roles = self.active_camera_roles
+        if not roles:
+            self.zed_video_label.setText("[GUI] 활성 카메라 없음")
+            return
+        try:
+            i = roles.index(self.current_view_role) if self.current_view_role in roles else 0
+        except ValueError:
+            i = 0
+        self.current_view_role = roles[(i + 1) % len(roles)]
+        # 전환 시 잔상 제거
+        self.zed_video_label.setText("")
+        try:
+            self.zed_view_toggle_button.setText(f"view: {self.current_view_role}")
+        except Exception:
+            pass
+        logger_mp.info(f"[GUI] camera view → role={self.current_view_role}")
 
 
 
@@ -1101,36 +1127,38 @@ class TeleopUI(QtWidgets.QMainWindow):
 
     def update_frame(self):
         """
-        Shared Memory에서 최신 컬러 이미지를 읽어와서 video_label과 zed_video_label에 표시
+        Part5: 표시 경로 정합. 활성 카메라 role 들의 CAMERA_VIEW SHM 에서 frame_left
+        를 읽어 zed_video_label 에 표시. role 은 toggle 로 순환. ZED stereo 시에도
+        좌안(frame_left) 만 GUI 에 표시 (헤드셋은 양안). 빈 프레임 가드 추가.
         """
-        try:
-            data_dict = self.camera_shm.read_data()
-        except Exception as e:
-            # 읽기 실패 시 간단히 리턴 (로그를 남겨도 좋음)
+        role = self.current_view_role
+        if role is None or role not in self.view_shms:
+            # 활성 카메라 없음 → 라벨에 안내 텍스트, frame 표시 안 함.
+            if self.zed_video_label is not None:
+                self.zed_video_label.setText("[GUI] 활성 카메라 없음")
             return
 
-        # 카메라 이미지 가져오기 (선택된 뷰에 따라)
-        if self.zed_current_view == ZED_VIEW_LEFT:
-            zed_img = data_dict.get("camera_left", None)
-            if zed_img is None:
-                # 이전 프레임이 있다면 재사용
-                if hasattr(self, 'prev_left_img') and self.prev_left_img is not None:
-                    zed_img = self.prev_left_img.copy()
-            else:
-                # 현재 프레임을 저장해두기
-                self.prev_left_img = zed_img.copy()
-        else:  # ZED_VIEW_REALSENSE
-            zed_img = data_dict.get("realsense", None)
-            if zed_img is None:
-                # 이전 프레임이 있다면 재사용
-                if hasattr(self, 'prev_realsense_img') and self.prev_realsense_img is not None:
-                    zed_img = self.prev_realsense_img.copy()
-            else:
-                # 현재 프레임을 저장해두기
-                self.prev_realsense_img = zed_img.copy()
+        shm = self.view_shms[role]
+        try:
+            data_dict = shm.read_data()
+        except Exception:
+            return
 
-        # 작업 공간 마스크 적용 및 테두리/마커 표시 (APPLY_MASK_IN_GUI가 True이고 ZED Left일 때만)
-        if zed_img is not None and APPLY_MASK_IN_GUI and self.zed_current_view == ZED_VIEW_LEFT:
+        zed_img = data_dict.get("frame_left", None)
+        if zed_img is None or not zed_img.any():
+            # 워커가 아직 프레임을 안 썼거나 전부 0 → "신호 없음" 표시 (검은 화면 회피).
+            prev = self._prev_frames.get(role)
+            if prev is not None:
+                zed_img = prev.copy()
+            else:
+                if self.zed_video_label is not None:
+                    self.zed_video_label.setText(f"[{role}] 영상 신호 없음")
+                return
+        else:
+            self._prev_frames[role] = zed_img.copy()
+
+        # 작업 공간 마스크 적용 및 테두리/마커 표시: ego 일 때만 (ZED-left 가 ego 역할).
+        if zed_img is not None and APPLY_MASK_IN_GUI and role == 'ego':
                 try:
                     mask_data = self.workspace_mask_shm.read_data()
                     mask_left_flat = mask_data.get("mask_left_flat", None)
@@ -1286,7 +1314,9 @@ class TeleopUI(QtWidgets.QMainWindow):
         윈도우가 닫힐 때 SharedMemoryManager 닫기
         """
         try:
-            self.camera_shm.worker_close()
+            for s in self.view_shms.values():
+                try: s.worker_close()
+                except Exception: pass
             self.workspace_mask_shm.worker_close()
             # television_shm.worker_close() 제거됨
             self.record_task_shm.worker_close()
@@ -1306,7 +1336,7 @@ class TeleopUI(QtWidgets.QMainWindow):
         # Meshcat 시각화 기능 제거됨
         pass
 
-def run_ui(shared_event, shm_name, shared_lock):
+def run_ui(shared_event, shm_name, shared_lock, active_camera_roles=None):
 
     # Qt WebEngine 초기화를 위한 속성 설정 (OpenGL 컨텍스트 공유)
     # Meshcat 제거로 필요 없지만, 호환성을 위해 유지
@@ -1316,7 +1346,8 @@ def run_ui(shared_event, shm_name, shared_lock):
     app = QtWidgets.QApplication(sys.argv)
 
     # TeleopUI 인스턴스 생성 및 표시
-    window = TeleopUI(shared_event,shm_name, shared_lock)
+    window = TeleopUI(shared_event, shm_name, shared_lock,
+                     active_camera_roles=active_camera_roles)
     window.show()
 
     # stop_evt_ui가 set되면 애플리케이션 종료

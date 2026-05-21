@@ -64,8 +64,11 @@ under (basis) Robot Convention, hand's initial pose convention:
 """
 
 class TeleVisionWrapper:
-    def __init__(self, binocular, img_shape, img_shm_name, vr_input="hand"):
-        self.tv = TeleVision(binocular, img_shape, img_shm_name, vr_input=vr_input)
+    def __init__(self, binocular, img_shape, img_shm_name, vr_input="hand",
+                 camera_shm_key="rs_ego_shm"):
+        # Part5: camera_shm_key 를 TeleVision 으로 그대로 전달 (default = ego 시점).
+        self.tv = TeleVision(binocular, img_shape, img_shm_name,
+                             vr_input=vr_input, camera_shm_key=camera_shm_key)
         self.vr_input = vr_input
 
     def get_data(self):

@@ -18,13 +18,13 @@ from multiprocessing import context
 Value = context._default_context.Value
 
 from sharedmemory.shmManager import SharedMemoryManager
-from sharedmemory.shm_schema import CAMERA
+from sharedmemory.shm_schema import CAMERA_VIEW
 
 
 class TeleVision:
     def __init__(self, binocular, img_shape, img_shm_name,
                  cert_file="./cert.pem", key_file="./key.pem",
-                 ngrok=False, vr_input="hand"):
+                 ngrok=False, vr_input="hand", camera_shm_key="rs_ego_shm"):
         """
         vr_input:
             "hand"       - Quest3 hand tracking (Vuer HAND_MOVE 이벤트)
@@ -41,10 +41,17 @@ class TeleVision:
         else:
             self.img_width  = img_shape[1]
 
+        # Vuer 가 cert/key 받으면 HTTPS, 아니면 HTTP. WebXR (Quest3 안 브라우저) 는
+        # HTTPS 강제이므로 cert/key 가 실제 존재할 때만 전달. 둘 다 없으면 HTTP 로 시작
+        # (로컬 개발 환경 / 테스트 용도).
+        import os as _os
+        _cert_kwargs = {}
+        if cert_file and key_file and _os.path.exists(cert_file) and _os.path.exists(key_file):
+            _cert_kwargs = {"cert": cert_file, "key": key_file}
         if ngrok:
-            self.vuer = Vuer(host='0.0.0.0', queries=dict(grid=False), queue_len=3)
+            self.vuer = Vuer(host='0.0.0.0', queries=dict(grid=False), queue_len=3, **_cert_kwargs)
         else:
-            self.vuer = Vuer(host='0.0.0.0', port=8012, queries=dict(grid=False), queue_len=3)
+            self.vuer = Vuer(host='0.0.0.0', port=8012, queries=dict(grid=False), queue_len=3, **_cert_kwargs)
 
         # 양쪽 핸들러 모두 등록 — Vuer는 활성 입력 종류에 맞는 이벤트만 발화한다.
         self.vuer.add_handler("HAND_MOVE")(self.on_hand_move)
@@ -56,7 +63,10 @@ class TeleVision:
         # self.img_array = np.ndarray(img_shape, dtype=np.uint8, buffer=existing_shm.buf)
         self.lock = Lock()
 
-        self.camera_image = SharedMemoryManager(CAMERA, self.lock, "camera_shm")
+        # Part5: 표시 경로 = 데이터 경로 (CAMERA_VIEW). default 는 ego 시점 (헤드셋
+        # 사용자 view). 멀티 카메라 setup 에서 wrist 카메라를 Vuer 화면에 띄울 필요
+        # 는 없으니 ego 고정. 외부에서 camera_shm_key 로 override 가능.
+        self.camera_image = SharedMemoryManager(CAMERA_VIEW, self.lock, camera_shm_key)
 
         if binocular:
             self.vuer.spawn(start=False)(self.main_image_binocular)
@@ -246,10 +256,19 @@ class TeleVision:
                 # 읽기 실패 시 간단히 리턴 (로그를 남겨도 좋음)
                 return
 
-            left_raw = data_dict.get("camera_left", None)
-            left_display_image = cv2.cvtColor(left_raw, cv2.COLOR_BGR2RGB)            
-            
-            right_raw = data_dict.get("camera_right", None)
+            # Part5: CAMERA_VIEW schema (frame_left/frame_right/is_stereo).
+            # 빈 프레임 (전부 0) 이면 표시 skip — 워커 미동작 / 카메라 미연결 가드.
+            left_raw  = data_dict.get("frame_left",  None)
+            right_raw = data_dict.get("frame_right", None)
+            if left_raw is None or not left_raw.any():
+                await asyncio.sleep(0.016)
+                continue
+            # is_stereo=0 (RealSense mono) 일 때 frame_right 가 zero — 양안 모두
+            # frame_left 사용 (헤드셋에서 한쪽 눈만 보이지 않게).
+            is_stereo = int(data_dict.get("is_stereo", 0)) if "is_stereo" in data_dict else 0
+            if not is_stereo or right_raw is None or not right_raw.any():
+                right_raw = left_raw
+            left_display_image  = cv2.cvtColor(left_raw,  cv2.COLOR_BGR2RGB)
             right_display_image = cv2.cvtColor(right_raw, cv2.COLOR_BGR2RGB)
             aspect_ratio = self.img_width / self.img_height
             session.upsert(
@@ -302,9 +321,10 @@ class TeleVision:
             except Exception as e:
                 return
 
-            raw = data_dict.get("realsense", None)
-            if raw is None:
-                # frame 이 아직 안 들어왔으면 다음 cycle 까지 대기
+            # Part5: CAMERA_VIEW schema 의 frame_left 사용 (mono 표시).
+            raw = data_dict.get("frame_left", None)
+            if raw is None or not raw.any():
+                # frame 이 아직 안 들어왔거나 전부 0 → 다음 cycle 까지 대기.
                 await asyncio.sleep(0.016)
                 continue
             display_image = cv2.cvtColor(raw, cv2.COLOR_BGR2RGB)
