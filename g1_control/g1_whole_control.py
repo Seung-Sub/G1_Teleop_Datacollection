@@ -172,46 +172,26 @@ class G1_29_ArmController:
 
 #----------------------------------------------------------------------------------------------------------------------------------------------------------------------------#
     def _subscribe_motor_state(self):
-        # daemon thread — silent exception 으로 죽으면 self.remote 갱신이 멈춰서
-        # default_pos_state 등 button 폴링 코드가 hang 된다. 따라서 try/except 로
-        # 둘러싸고 예외 발생 시 print + thread 살리기.
-        loop_n = 0
-        last_hb = time.time()
         while not self._stop_event.is_set():
-            try:
-                msg = self.lowstate_subscriber.Read()
+            msg = self.lowstate_subscriber.Read()
 
-                if msg is not None:
-                    # 수신 즉시 host 시각 캡처 (Phase K2). msg.tick (robot-internal uint32) 도 보존.
-                    recv_ts = time.perf_counter_ns()
-                    self.remote.set(msg.wireless_remote)
-                    lowstate = G1_29_LowState()
-                    lowstate.recv_ts = recv_ts
-                    try:
-                        lowstate.robot_tick = int(msg.tick)
-                    except Exception:
-                        lowstate.robot_tick = 0
-                    for i in range(G1_29_Num_Motors):
-                        lowstate.motor_state[i].q  = msg.motor_state[i].q
-                        lowstate.motor_state[i].dq = msg.motor_state[i].dq
-                    lowstate.imu_quat = np.array(msg.imu_state.quaternion, dtype=np.float32)
-                    lowstate.gyroscope = np.array(msg.imu_state.gyroscope, dtype=np.float32)
+            if msg is not None:
+                # 수신 즉시 host 시각 캡처 (Phase K2). msg.tick (robot-internal uint32) 도 보존.
+                recv_ts = time.perf_counter_ns()
+                self.remote.set(msg.wireless_remote)
+                lowstate = G1_29_LowState()
+                lowstate.recv_ts = recv_ts
+                try:
+                    lowstate.robot_tick = int(msg.tick)
+                except Exception:
+                    lowstate.robot_tick = 0
+                for i in range(G1_29_Num_Motors):
+                    lowstate.motor_state[i].q  = msg.motor_state[i].q
+                    lowstate.motor_state[i].dq = msg.motor_state[i].dq
+                lowstate.imu_quat = np.array(msg.imu_state.quaternion, dtype=np.float32)
+                lowstate.gyroscope = np.array(msg.imu_state.gyroscope, dtype=np.float32)
 
-                    self.lowstate_buffer.SetData(lowstate)
-                loop_n += 1
-                # 5초마다 heartbeat — A/start 버튼 hang 디버깅용.
-                now = time.time()
-                if now - last_hb >= 5.0:
-                    print(f"[G1_Ctrl/sub_hb] alive  loops={loop_n} "
-                          f"button.start={self.remote.button[KeyMap.start]} "
-                          f"button.A={self.remote.button[KeyMap.A]}", flush=True)
-                    last_hb = now
-            except Exception as e:
-                # 절대로 thread 죽으면 안 됨 — 예외 로깅 후 계속.
-                import traceback
-                print(f"[G1_Ctrl/sub_ERROR] {type(e).__name__}: {e}", flush=True)
-                traceback.print_exc()
-                time.sleep(0.1)
+                self.lowstate_buffer.SetData(lowstate)
 
             self.obs_rate.sleep()
 
@@ -641,8 +621,6 @@ class G1_29_ArmController:
         print("In default position state. Press A to end initial setting.")
         # move_to_default_pos 와 동일 — 실 29 joint 만 명령 (Phase N 이후 enum 길이 35).
         real_joints = list(G1_29_JointIndex)[:29]
-        loop_n = 0
-        last_hb = time.time()
         while self.remote.button[KeyMap.A] != 1:
             for idx, motor_id in enumerate(real_joints):
                 self.msg.motor_cmd[motor_id].mode = 1
@@ -655,19 +633,6 @@ class G1_29_ArmController:
             self.msg.crc = self.crc.Crc(self.msg)
             self.lowcmd_publisher.Write(self.msg)
             time.sleep(self.control_dt)
-            loop_n += 1
-            # 1초마다 heartbeat — A 폴링이 실시간으로 button 보고 있는지 확인.
-            # (만약 subscribe thread 가 죽었다면 button.A 가 영원히 0 유지 — 그래도
-            #  이 print 는 계속 나와서 main thread 가 정상임을 확인 가능.)
-            now = time.time()
-            if now - last_hb >= 1.0:
-                print(f"[G1_Ctrl/dps_hb] loops={loop_n} "
-                      f"button.A={self.remote.button[KeyMap.A]} "
-                      f"button.start={self.remote.button[KeyMap.start]} "
-                      f"button.B={self.remote.button[KeyMap.B]} "
-                      f"(누른 순간 1 로 변해야 함)", flush=True)
-                last_hb = now
-        print("[G1_Ctrl] default_pos_state 종료 — A 감지 성공", flush=True)
 #----------------------------------------------------------------------------------------------------------------------------------------------------------------------------#
 
     def stop(self) -> None:
