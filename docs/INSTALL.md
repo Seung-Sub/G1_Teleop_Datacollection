@@ -42,13 +42,16 @@ which python pip    # → /home/<user>/miniconda3/envs/teleop/bin/...
 conda install -c conda-forge -y pinocchio casadi
 # → pinocchio 3.2.0 / casadi 3.6.5 (2026-05 시점)
 
-# pip: numpy<2 + scipy + opencv-contrib + 데이터 IO
-# 주의: opencv-contrib-python 사용 (워크스페이스 코드가 cv2.aruco 호출 — workers/worker_zed.py).
+# pip: numpy<2 + scipy + opencv-contrib HEADLESS + 데이터 IO
+# 주의: opencv-contrib-python-headless 사용 (cv2.aruco 호출 — workers/worker_zed.py).
+#       GUI 번들(=비-headless)은 자신만의 Qt5 를 site-packages/cv2/qt/ 로 싣는데,
+#       그게 PyQt5 의 Qt 와 충돌해 ("Could not load Qt platform plugin xcb") main.py 가
+#       GUI 띄우지 못함. workspace 가 cv2.imshow 미사용이므로 headless 가 정답.
 #       setup.py 가 같은 패키지를 ==4.10.0.82 로 pin 해 §6 단계에서 재설치됨.
 pip install \
     'numpy<2' \
     scipy \
-    'opencv-contrib-python<4.11' \
+    'opencv-contrib-python-headless<4.11' \
     pyarrow \
     pandas \
     pyyaml \
@@ -294,7 +297,7 @@ all offline checks passed — codebase + env integrity OK.
 python                    3.8.20
 numpy                     1.24.4
 scipy                     1.10.1
-opencv-contrib-python     4.10.0.82  (setup.py pin — cv2.aruco 필요)
+opencv-contrib-python-headless  4.10.0.82  (setup.py pin — cv2.aruco 필요, Qt 번들 X)
 pandas                    2.0.3
 pyarrow                   17.0.0
 PyYAML                    6.0.3

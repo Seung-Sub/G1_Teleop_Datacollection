@@ -12,7 +12,11 @@ from setuptools import setup, find_packages
 #       Python 3.8 에서 aiortc==1.8.0 → av<12 → cp38 wheel 없어 ffmpeg dev 빌드 필요.
 #       2026-05 dead-dep 으로 판단해 제거.
 base_requires = [
-    "opencv-contrib-python==4.10.0.82",
+    # headless 변종: opencv-contrib-python 이 번들로 싣는 Qt5 가 PyQt5 의 Qt 와 충돌
+    # ("Could not load the Qt platform plugin xcb" 에러 — symbol-space 미스매치).
+    # 본 워크스페이스는 cv2.imshow 등 cv2-GUI 미사용 → headless 가 안전한 드롭인.
+    # cv2.aruco 등 contrib 모듈은 headless 변종에도 동일 포함.
+    "opencv-contrib-python-headless==4.10.0.82",
     "params-proto==2.12.1",
     "pytransform3d==3.5.0",
     "scikit-learn==1.3.2",
