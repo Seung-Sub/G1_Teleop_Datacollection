@@ -49,18 +49,67 @@ kTopicDex3RightState   = "rt/dex3/right/state"
 
 _TRIGGER_THRESH = 0.5
 
-# DEX3 left/right URDF joint limits (rad) — 좌우 동일.
+# ── 파지 속도 / 안전 제어 파라미터 ────────────────────────────────────────
+# rate-limit 방식: 내부 명령목표(_cmd_q)를 매 프레임 _STEP_MAX 만큼 최종목표로
+# 전진시키되, _cmd_q 가 *현재 측정 위치*보다 _MAX_POS_ERR 이상 앞서지 못하게 한다.
+#   - 빈손: 손가락이 자유로워 현재 위치가 명령을 잘 따라옴 → _cmd_q 가 _STEP_MAX
+#           씩 빠르게 전진 → 빠른 파지/펴기.
+#   - 막힘: 물체에 막혀 현재 위치가 안 따라옴 → _cmd_q 가 현재+_MAX_POS_ERR 에서
+#           멈춤 → 위치오차 = _MAX_POS_ERR 로 상한 → tau = kp·err 포화 방지 (안전).
+# 과거의 "매 프레임 현재±e 로 목표를 clip" 방식은 빈손에서도 목표가 현재에 묶여
+# 모터 응답속도(느림)에 종속됐다. rate-limit 은 빈손 속도와 막힘 안전을 *분리*한다.
+_STEP_MAX    = 0.28    # 프레임당 최대 목표 전진량 (rad). ~100Hz × 0.18 ≈ 18rad/s 빠름.
+_MAX_POS_ERR = 0.30    # 명령목표가 현재보다 앞설 수 있는 최대 오차 (rad). 막힘 시 토크 상한.
+#   tau_max ≈ kp · _MAX_POS_ERR. kp=2.0, err=0.30 → 0.6(정규화). 로그상 안 죽은
+#   tau(~30만)가 과거 오차로 발생했음을 감안해 보수적으로 설정. 더 강하게 쥐려면
+#   _MAX_POS_ERR ↑, 더 안전하게는 ↓. 속도는 _STEP_MAX 로 독립 조절.
+
+# DEX3 left/right URDF joint limits (rad).
 # 인덱스는 *hardware* (Dex3_*_Left_JointIndex / Right_JointIndex) 순서.
 # Left  order: [Thumb0, Thumb1, Thumb2, Middle0, Middle1, Index0, Index1]
 # Right order: [Thumb0, Thumb1, Thumb2, Index0,  Index1,  Middle0, Middle1]
-# fingers 의 굽힘 부호는 좌우 동일 — 음수 방향이 닫힘.
-_THUMB0_LIMIT = (-1.04719755,  1.04719755)   # yaw
-_THUMB1_LIMIT = (-0.72431163,  0.920)        # bend
-_THUMB2_OPEN, _THUMB2_CLOSED   = 0.0,  1.74532925
-_M0_OPEN,     _M0_CLOSED       = 0.0, -1.57079632
-_M1_OPEN,     _M1_CLOSED       = 0.0, -1.74532925
-_I0_OPEN,     _I0_CLOSED       = 0.0, -1.57079632
-_I1_OPEN,     _I1_CLOSED       = 0.0, -1.74532925
+#
+# ⚠️ 좌우 거울대칭: thumb2/index/middle 의 *닫힘 부호가 좌우 반대* (실측 확정).
+#   - 왼손 closed:  Thumb2=+, Index/Middle=-   (스펙 범위의 음수쪽 또는 양수쪽 끝)
+#   - 오른손 closed: Thumb2=-, Index/Middle=+
+#
+# ⚠️ 관절 가동범위 (DEX3-1 공식 스펙, deg → rad):
+#   Thumb0(yaw)  : -60~ 60  = -1.047~+1.047
+#   Thumb1(bend) : -35~ 60  = -0.611~+1.047
+#   Thumb2       :   0~100  =  0~+1.745
+#   Index0       :   0~ 90  =  0~+1.571   ← 90° 한계! (과거 ±1.745 명령은 한계 초과)
+#   Index1       :   0~100  =  0~+1.745
+#   Middle0      :   0~ 90  =  0~+1.571   ← 90° 한계!
+#   Middle1      :   0~100  =  0~+1.745
+# closed 목표는 한계의 97%(_LIMIT_MARGIN) 로 둔다. 한계 정확히(100%)에 두면 빈손
+# 에서도 손가락이 기계 한계에 박혀 위치오차가 상시 남아 토크가 지속 발생 → 한계
+# 살짝 안쪽에서 멈추게 해 빈손 시 박힘/토크 잔류를 방지.
+_LIMIT_MARGIN = 0.97
+
+_J_THUMB2 = 1.74532925   # 100°
+_J_INDEX0 = 1.57079632   # 90°
+_J_INDEX1 = 1.74532925   # 100°
+_J_MID0   = 1.57079632   # 90°
+_J_MID1   = 1.74532925   # 100°
+
+_THUMB0_LIMIT = (-1.04719755,  1.04719755)   # yaw -60~60 (좌우 동일)
+_THUMB1_LIMIT = (-0.61086524,  1.04719755)   # bend -35~60 왼손 (스펙 범위)
+# 오른손 thumb bend 는 거울대칭. 부호 반전 범위.
+_THUMB1_LIMIT_R = (0.61086524, -1.04719755)
+
+# 왼손 (Thumb2 양수쪽, Index/Middle 음수쪽 닫힘). open=0.
+_THUMB2_OPEN, _THUMB2_CLOSED   = 0.0,  _J_THUMB2 * _LIMIT_MARGIN
+_M0_OPEN,     _M0_CLOSED       = 0.0, -_J_MID0   * _LIMIT_MARGIN
+_M1_OPEN,     _M1_CLOSED       = 0.0, -_J_MID1   * _LIMIT_MARGIN
+_I0_OPEN,     _I0_CLOSED       = 0.0, -_J_INDEX0 * _LIMIT_MARGIN
+_I1_OPEN,     _I1_CLOSED       = 0.0, -_J_INDEX1 * _LIMIT_MARGIN
+
+# 오른손 (거울대칭: Thumb2 음수쪽, Index/Middle 양수쪽 닫힘). open=0.
+_THUMB2_OPEN_R, _THUMB2_CLOSED_R = 0.0, -_J_THUMB2 * _LIMIT_MARGIN
+_M0_OPEN_R,     _M0_CLOSED_R     = 0.0,  _J_MID0   * _LIMIT_MARGIN
+_M1_OPEN_R,     _M1_CLOSED_R     = 0.0,  _J_MID1   * _LIMIT_MARGIN
+_I0_OPEN_R,     _I0_CLOSED_R     = 0.0,  _J_INDEX0 * _LIMIT_MARGIN
+_I1_OPEN_R,     _I1_CLOSED_R     = 0.0,  _J_INDEX1 * _LIMIT_MARGIN
 
 
 def _lerp_unit(u: float, lo: float, hi: float) -> float:
@@ -83,15 +132,19 @@ def _grip_q_left(grasp: bool, thumb_yaw: float, thumb_bend: float) -> np.ndarray
 
 
 def _grip_q_right(grasp: bool, thumb_yaw: float, thumb_bend: float) -> np.ndarray:
-    """Right-hand 7-vector in hardware order (Thumb0,1,2, Index0,1, Middle0,1)."""
+    """Right-hand 7-vector in hardware order (Thumb0,1,2, Index0,1, Middle0,1).
+
+    오른손은 거울대칭이라 thumb2/index/middle 의 닫힘 부호가 왼손과 반대 (*_R_* 상수).
+    thumb0(yaw)/thumb1(bend) 의 lerp 범위는 좌우 동일.
+    """
     return np.array([
         _lerp_unit(thumb_yaw,  *_THUMB0_LIMIT),
-        _lerp_unit(thumb_bend, *_THUMB1_LIMIT),
-        _THUMB2_CLOSED if grasp else _THUMB2_OPEN,
-        _I0_CLOSED if grasp else _I0_OPEN,
-        _I1_CLOSED if grasp else _I1_OPEN,
-        _M0_CLOSED if grasp else _M0_OPEN,
-        _M1_CLOSED if grasp else _M1_OPEN,
+        _lerp_unit(thumb_bend, *_THUMB1_LIMIT_R),
+        _THUMB2_CLOSED_R if grasp else _THUMB2_OPEN_R,
+        _I0_CLOSED_R if grasp else _I0_OPEN_R,
+        _I1_CLOSED_R if grasp else _I1_OPEN_R,
+        _M0_CLOSED_R if grasp else _M0_OPEN_R,
+        _M1_CLOSED_R if grasp else _M1_OPEN_R,
     ], dtype=np.float64)
 
 
@@ -155,22 +208,42 @@ class Dex3_Controller:
         # DexPilot retargeting (양손, 같은 yml)
         self.hand_retargeting = HandRetargeting(HandType.UNITREE_DEX3)
 
-        # DDS publishers/subscribers (xr_teleoperate 패턴 그대로)
+        # State arrays & recv_ts 를 *subscriber Init 보다 먼저* 생성한다.
+        # (콜백 핸들러가 이들을 참조하므로 등록 시점에 반드시 존재해야 함.)
+        self.left_hand_state_array  = Array('d', Dex3_Num_Motors, lock=True)
+        self.right_hand_state_array = Array('d', Dex3_Num_Motors, lock=True)
+        # ctrl_dual_hand 의 위치오차 클램프가 현재 state 를 읽기 위한 참조.
+        self._left_state_ref  = self.left_hand_state_array
+        self._right_state_ref = self.right_hand_state_array
+        # rate-limit 내부 명령목표 (이전 프레임 명령). None 이면 첫 호출 시 현재 state 로 초기화.
+        self._cmd_q_left  = None
+        self._cmd_q_right = None
+        # Phase K3 (P0-1.3): DDS 수신 시각 (host perf_counter_ns). 좌/우 별도.
+        # 콜백 핸들러가 msg 수신 직후 갱신, control_process 가 read.
+        self.left_state_recv_ts  = 0
+        self.right_state_recv_ts = 0
+
+        # DDS publishers — cmd 발행용.
         self.LeftHandCmb_publisher  = ChannelPublisher(kTopicDex3LeftCommand,  HandCmd_)
         self.LeftHandCmb_publisher.Init()
         self.RightHandCmb_publisher = ChannelPublisher(kTopicDex3RightCommand, HandCmd_)
         self.RightHandCmb_publisher.Init()
-        self.LeftHandState_subscriber  = ChannelSubscriber(kTopicDex3LeftState,  HandState_)
-        self.LeftHandState_subscriber.Init()
-        self.RightHandState_subscriber = ChannelSubscriber(kTopicDex3RightState, HandState_)
-        self.RightHandState_subscriber.Init()
 
-        self.left_hand_state_array  = Array('d', Dex3_Num_Motors, lock=True)
-        self.right_hand_state_array = Array('d', Dex3_Num_Motors, lock=True)
-        # Phase K3 (P0-1.3): DDS 수신 시각 (host perf_counter_ns). 좌/우 별도.
-        # _subscribe_hand_state 가 msg 수신 직후 갱신, control_process 가 read.
-        self.left_state_recv_ts  = 0
-        self.right_state_recv_ts = 0
+        # DDS subscribers — *콜백(handler) 방식* 으로 등록.
+        #   과거: Init() 후 별도 스레드에서 subscriber.Read() 폴링 → DDS discovery
+        #   매칭 지연 시 Read() 가 계속 None 을 반환해 init 이 간헐적으로 무한 hang
+        #   되는 race 가 있었음 (단독 스크립트는 participant 1개라 즉시 매칭되어 항상
+        #   성공했지만, main 처럼 여러 participant 가 동시에 discovery 경쟁하면 hand
+        #   subscriber 매칭이 늦어짐). xr_teleoperate 원본 및 verify_dex3_cmd.py 와
+        #   동일하게 콜백(Init(handler, queuelen)) 으로 바꿔 도착 즉시 처리한다.
+        self.LeftHandState_subscriber  = ChannelSubscriber(kTopicDex3LeftState,  HandState_)
+        self.LeftHandState_subscriber.Init(
+            lambda msg: self._on_hand_state(msg, self.left_hand_state_array,
+                                            Dex3_1_Left_JointIndex, 'l'), 1)
+        self.RightHandState_subscriber = ChannelSubscriber(kTopicDex3RightState, HandState_)
+        self.RightHandState_subscriber.Init(
+            lambda msg: self._on_hand_state(msg, self.right_hand_state_array,
+                                            Dex3_1_Right_JointIndex, 'r'), 1)
 
         # init cmd msg + motor_mode
         self.left_msg  = unitree_hg_msg_dds__HandCmd_()
@@ -179,7 +252,7 @@ class Dex3_Controller:
             self.left_msg.motor_cmd[id].q   = 0.0
             self.left_msg.motor_cmd[id].dq  = 0.0
             self.left_msg.motor_cmd[id].tau = 0.0
-            self.left_msg.motor_cmd[id].kp  = 1.5
+            self.left_msg.motor_cmd[id].kp  = 2.0  # 1.0->2.0: rate-limit 으로 빠른 파지 (오차상한 e_max 로 토크 안전)
             self.left_msg.motor_cmd[id].kd  = 0.2
 
         self.right_msg = unitree_hg_msg_dds__HandCmd_()
@@ -188,31 +261,34 @@ class Dex3_Controller:
             self.right_msg.motor_cmd[id].q   = 0.0
             self.right_msg.motor_cmd[id].dq  = 0.0
             self.right_msg.motor_cmd[id].tau = 0.0
-            self.right_msg.motor_cmd[id].kp  = 1.5
+            self.right_msg.motor_cmd[id].kp  = 2.0  # 1.0->2.0: rate-limit 으로 빠른 파지 (오차상한 e_max 로 토크 안전)
             self.right_msg.motor_cmd[id].kd  = 0.2
 
-        # State subscribe threads — side 인자 ('l'/'r') 로 recv_ts 분기 (Phase K3)
-        self.subscribe_Lstate_thread = threading.Thread(
-            target=self._subscribe_hand_state,
-            args=(self.LeftHandState_subscriber,  self.left_hand_state_array,
-                  Dex3_1_Left_JointIndex,  'l'),
-            daemon=True,
-        )
-        self.subscribe_Rstate_thread = threading.Thread(
-            target=self._subscribe_hand_state,
-            args=(self.RightHandState_subscriber, self.right_hand_state_array,
-                  Dex3_1_Right_JointIndex, 'r'),
-            daemon=True,
-        )
-        self.subscribe_Lstate_thread.start()
-        self.subscribe_Rstate_thread.start()
+        # 콜백 방식이므로 별도 폴링 스레드는 불필요 (DDS listener 가 내부 스레드에서
+        # 도착 즉시 _on_hand_state 를 호출).
 
-        # Wait for first state msg (xr_teleoperate 와 동일 패턴)
+        # Wait for first state msg — *양손 모두* recv_ts > 0 이 될 때까지.
+        #   과거엔 any(right_hand_state_array) 만 검사 → (a) 손가락이 정확히 중립이면
+        #   q≈0 이라 any() 가 False 로 머물 수 있고, (b) 왼손은 아예 확인 안 해 왼손
+        #   subscriber 가 매칭 전이어도 init 완료 처리되어 왼손 state 가 0 으로 남는
+        #   문제가 있었음. 콜백 기반 recv_ts 로 "실제 메시지 도착" 을 정확히 판정한다.
+        _wait_start = time.time()
+        _wait_warned_at = 0.0
+        _wait_log_interval = 2.0
         while True:
-            if any(self.right_hand_state_array):
+            if self.left_state_recv_ts > 0 and self.right_state_recv_ts > 0:
                 break
-            time.sleep(0.01)
-            logger_mp.info("[Dex3_Controller] Waiting to subscribe dds...")
+            now = time.time()
+            elapsed = now - _wait_start
+            if now - _wait_warned_at >= _wait_log_interval:
+                _wait_warned_at = now
+                missing = []
+                if self.left_state_recv_ts  <= 0: missing.append("left")
+                if self.right_state_recv_ts <= 0: missing.append("right")
+                print(f"[Dex3_Controller] Waiting for hand state DDS ({elapsed:.1f}s)... "
+                      f"미수신: {missing}. rt/dex3/{{left,right}}/state publish 가 0Hz 이면 "
+                      f"DEX3 보드/케이블/펌웨어 점검 필요.", flush=True)
+            time.sleep(0.05)
 
         hand_control_thread = threading.Thread(
             target=self.control_process,
@@ -225,47 +301,41 @@ class Dex3_Controller:
         logger_mp.info("Initialize Dex3_Controller OK!\n")
 
     # ------------------------------------------------------------------
-    def _subscribe_hand_state(self, subscriber, state_array, joint_index_enum, side):
-        while True:
-            msg = subscriber.Read()
-            if msg is not None:
-                # Phase K3: 수신 직후 host 시각 캡처. control_process / worker_hand_ctrl
-                # 가 이 ts 를 obs_hand_ts 로 사용해 latency 정확도 향상.
-                recv_ts = time.perf_counter_ns()
-                for idx, jid in enumerate(joint_index_enum):
-                    state_array[idx] = msg.motor_state[jid].q
-                if side == 'l':
-                    self.left_state_recv_ts  = recv_ts
+    def _on_hand_state(self, msg, state_array, joint_index_enum, side):
+        """DDS 콜백 핸들러 — 메시지 1건 도착 시 호출됨 (listener 내부 스레드).
+        과거 _subscribe_hand_state 의 while/Read()/sleep 폴링을 콜백으로 대체."""
+        if msg is None:
+            return
+        # Phase K3: 수신 직후 host 시각 캡처. control_process / worker_hand_ctrl
+        # 가 이 ts 를 obs_hand_ts 로 사용해 latency 정확도 향상.
+        recv_ts = time.perf_counter_ns()
+        for idx, jid in enumerate(joint_index_enum):
+            state_array[idx] = msg.motor_state[jid].q
+        if side == 'l':
+            self.left_state_recv_ts  = recv_ts
+        else:
+            self.right_state_recv_ts = recv_ts
+        # Phase K8 (P1-5): tactile=on 시 press_sensor_state sequence length
+        # 만 첫 메시지에서 1회 로깅.
+        if self.collect_tactile and not self._tactile_logged.get(side, False):
+            try:
+                seq = getattr(msg, 'press_sensor_state', None)
+                if seq is None:
+                    logger_mp.warning(f"[Dex3:{side}] tactile=on but HandState has no press_sensor_state attr")
                 else:
-                    self.right_state_recv_ts = recv_ts
-                # Phase K8 (P1-5): tactile=on 시 press_sensor_state sequence length
-                # 만 첫 메시지에서 1회 로깅. SDK IDL 사실 (PressSensorState_.pressure
-                # = float32[12], temperature = float32[12]) 은 확정. 그러나 HandState_
-                # 의 press_sensor_state 는 sequence (가변 길이 list of PressSensorState_)
-                # 라 N 개 객체가 도착하는지는 실 device 확인 필요. 외부 자료는 N=9
-                # 라고 명시 (사용자 검증). 본 로깅으로 실측 후 SHM schema 확정 → 후속
-                # 작업에서 dex3_tactile_shm 추가 + parquet observation.sensor 활용.
-                if self.collect_tactile and not self._tactile_logged.get(side, False):
-                    try:
-                        seq = getattr(msg, 'press_sensor_state', None)
-                        if seq is None:
-                            logger_mp.warning(f"[Dex3:{side}] tactile=on but HandState has no press_sensor_state attr")
-                        else:
-                            n_objs = len(seq)
-                            if n_objs > 0:
-                                # 첫 객체의 pressure 배열 길이 (IDL: float32[12])
-                                p_len = len(getattr(seq[0], 'pressure', []))
-                            else:
-                                p_len = 0
-                            logger_mp.info(
-                                f"[Dex3:{side}] tactile press_sensor_state: "
-                                f"{n_objs} objects, each pressure[{p_len}]. "
-                                f"Total tactile values per hand = {n_objs * p_len}."
-                            )
-                    except Exception as e:
-                        logger_mp.warning(f"[Dex3:{side}] tactile length 로깅 실패: {e}")
-                    self._tactile_logged[side] = True
-            time.sleep(0.002)
+                    n_objs = len(seq)
+                    if n_objs > 0:
+                        p_len = len(getattr(seq[0], 'pressure', []))
+                    else:
+                        p_len = 0
+                    logger_mp.info(
+                        f"[Dex3:{side}] tactile press_sensor_state: "
+                        f"{n_objs} objects, each pressure[{p_len}]. "
+                        f"Total tactile values per hand = {n_objs * p_len}."
+                    )
+            except Exception as e:
+                logger_mp.warning(f"[Dex3:{side}] tactile length 로깅 실패: {e}")
+            self._tactile_logged[side] = True
 
     def get_hand_state_recv_ts(self) -> int:
         """좌/우 중 더 오래된 recv_ts 반환 (worker_hand_ctrl 가 obs_hand_ts 로 사용).
@@ -282,11 +352,43 @@ class Dex3_Controller:
         return min(l, r)
 
     def ctrl_dual_hand(self, left_q_target, right_q_target):
-        """left/right 7-vector(rad, hardware order) -> DDS publish."""
+        """left/right 7-vector(rad, hardware order) -> DDS publish.
+
+        rate-limit + 오차상한 방식 (빠른 파지 + 막힘 안전 분리):
+          1) 내부 명령목표 _cmd_q 를 최종목표(left/right_q_target) 쪽으로 매 프레임
+             최대 _STEP_MAX 만큼 전진 (빠른 속도 확보).
+          2) _cmd_q 가 *현재 측정 위치*보다 _MAX_POS_ERR 이상 앞서지 못하게 상한
+             (물체에 막히면 현재가 안 따라오므로 _cmd_q 도 멈춤 → tau 포화 방지).
+        빈손이면 현재 위치가 명령을 잘 따라와 _cmd_q 가 _STEP_MAX 씩 빠르게 전진하고,
+        막히면 오차가 _MAX_POS_ERR 로 묶여 안전하다. (과거 현재±e clip 방식은 빈손
+        속도까지 모터 응답에 묶여 느렸음 → rate-limit 으로 분리.)
+        """
+        cur_l = np.array(self._left_state_ref[:],  dtype=np.float64)
+        cur_r = np.array(self._right_state_ref[:], dtype=np.float64)
+        tgt_l = np.asarray(left_q_target,  dtype=np.float64)
+        tgt_r = np.asarray(right_q_target, dtype=np.float64)
+
+        # 첫 호출 시 내부 명령목표를 현재 위치로 초기화 (급격한 점프 방지).
+        if self._cmd_q_left is None:
+            self._cmd_q_left  = cur_l.copy()
+        if self._cmd_q_right is None:
+            self._cmd_q_right = cur_r.copy()
+
+        def _advance(cmd, tgt, cur):
+            # 1) 최종목표 쪽으로 최대 _STEP_MAX 전진
+            delta = np.clip(tgt - cmd, -_STEP_MAX, _STEP_MAX)
+            cmd = cmd + delta
+            # 2) 현재 위치 기준 ±_MAX_POS_ERR 로 상한 (막힘 시 토크 포화 방지)
+            cmd = np.clip(cmd, cur - _MAX_POS_ERR, cur + _MAX_POS_ERR)
+            return cmd
+
+        self._cmd_q_left  = _advance(self._cmd_q_left,  tgt_l, cur_l)
+        self._cmd_q_right = _advance(self._cmd_q_right, tgt_r, cur_r)
+
         for idx, jid in enumerate(Dex3_1_Left_JointIndex):
-            self.left_msg.motor_cmd[jid].q = float(left_q_target[idx])
+            self.left_msg.motor_cmd[jid].q = float(self._cmd_q_left[idx])
         for idx, jid in enumerate(Dex3_1_Right_JointIndex):
-            self.right_msg.motor_cmd[jid].q = float(right_q_target[idx])
+            self.right_msg.motor_cmd[jid].q = float(self._cmd_q_right[idx])
         try:
             self.LeftHandCmb_publisher.Write(self.left_msg)
             self.RightHandCmb_publisher.Write(self.right_msg)
