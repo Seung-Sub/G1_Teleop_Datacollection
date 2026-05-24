@@ -476,10 +476,13 @@ def cleanup(processes, managers):
     이전엔 join(timeout=2) 만 했어서 worker 가 shutdown event 를 못 봤거나 hang
     상태일 때 좀비 + SHM 누수가 남았다. 이제 모든 경우에 깨끗이 정리.
     """
-    # 1) graceful — workers 가 shutdown event 보고 자기 정리
+    # 1) graceful — workers 가 shutdown event 보고 자기 정리.
+    #    G1_Ctrl worker(hoist) 는 종료 시 damp_to_release(~3s: ramp 2.5s + settle 0.5s)
+    #    로 팔 힘을 점진적으로 빼므로, join timeout 을 그보다 넉넉히(5s) 줘서 damp 가
+    #    완료되기 전에 terminate 로 잘리지 않게 한다. (잘리면 팔이 갑자기 떨어짐.)
     for p in processes:
         try:
-            p.join(timeout=2)
+            p.join(timeout=5)
         except Exception:
             pass
 

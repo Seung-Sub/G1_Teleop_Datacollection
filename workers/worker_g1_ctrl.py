@@ -215,6 +215,13 @@ class G1CtrlWorker(DualRateWorker):
                     self.g1_ctrl.disengage_arm_sdk(ramp_sec=2.0)
                 except Exception as e:
                     logger_mp.warning(f"[G1_Ctrl] disengage_arm_sdk 실패: {e}")
+            # hoist 면 종료 전 팔 힘을 *점진적으로* 빼서 자유낙하/파손 방지.
+            # (그냥 stop() 하면 lowcmd 끊겨 팔이 갑자기 떨어짐.)
+            elif self.g1_ctrl is not None and self.lower_body != 'loco':
+                try:
+                    self.g1_ctrl.damp_to_release(ramp_sec=2.5, kd_hold=5.0)
+                except Exception as e:
+                    logger_mp.warning(f"[G1_Ctrl] damp_to_release 실패: {e}")
             if self.d_ctrl is not None:
                 self.d_ctrl.disconnect_dynamixel()
             if self.g1_ctrl is not None:

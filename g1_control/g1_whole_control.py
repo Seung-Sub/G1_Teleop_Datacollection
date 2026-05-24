@@ -635,11 +635,95 @@ class G1_29_ArmController:
             time.sleep(self.control_dt)
 #----------------------------------------------------------------------------------------------------------------------------------------------------------------------------#
 
-    def stop(self) -> None:
-        """루프를 안전하게 종료하고 스레드를 join."""
+    def damp_to_release(self, ramp_sec: float = 2.5, kd_hold: float = 5.0) -> None:
+        """종료 시 팔이 자유낙하하지 않도록 *부드럽게* 힘을 빼는 시퀀스 (hoist 모드 전용).
+
+        문제: hoist 모드에서 그냥 stop() 하면 publish_thread 가 멈춰 lowcmd 가 끊기고,
+        G1 펌웨어는 명령이 끊긴 모터를 즉시 off/damp 로 두어 *팔이 갑자기 떨어진다*.
+        파손 위험.
+
+        해결: stop() 전에 이 메서드를 호출한다. 동작:
+          1) publish_thread 를 먼저 정지 (이 메서드가 단독으로 lowcmd 발행).
+          2) 현재 관절 q 를 고정 목표로 유지(자유낙하 방지)하면서, kp 를 현재값 →
+             0 으로 ramp_sec 동안 선형 감소. kd 는 kd_hold(점성 감쇠) 로 전환.
+          3) kp→0 이 되면 위치 유지력은 사라지고 kd 감쇠만 남아 팔이 *천천히* 내려감.
+             (자세를 능동 제어하지 않음 — 단지 힘을 점진적으로 빼는 것.)
+
+        kd_hold: 클수록 더 천천히 떨어진다(점성↑). 너무 크면 진동 가능 → 5 권장.
+                 (참고: 기존 daming_state 는 kp=0,kd=8 을 즉시 적용 = 급격. 여기선 ramp.)
+        """
+        # 1) publish_thread 정지 (충돌 방지). _stop_event 는 아직 set 안 함 — 이
+        #    메서드가 끝난 뒤 stop() 에서 set.
         self._stop_event.set()
-        self.subscribe_thread.join()
-        self.publish_thread.join()
+        try:
+            if self.publish_thread.is_alive():
+                self.publish_thread.join(timeout=1.0)
+        except Exception:
+            pass
+
+        ls = self.lowstate_buffer.GetData()
+        if ls is None:
+            logger_mp.warning("[G1_29_ArmController] damp_to_release: lowstate 없음, 스킵")
+            return
+
+        real_joints = list(G1_29_JointIndex)[:29]
+        # 시작 시점의 현재 관절각을 고정 목표로 (자유낙하 방지)
+        hold_q = np.array([ls.motor_state[i].q for i in real_joints], dtype=np.float32)
+        # 시작 kp (프로파일 값). ramp 출발점.
+        kp0 = np.array([float(self.kp[idx]) if idx < len(self.kp) else 0.0
+                        for idx in range(len(real_joints))], dtype=np.float32)
+
+        logger_mp.info(f"[G1_29_ArmController] damp_to_release: {ramp_sec}s 동안 kp→0 점진 (부드러운 힘 빼기)")
+        steps = max(1, int(ramp_sec / self.control_dt))
+        for s in range(steps + 1):
+            alpha = s / steps                # 0 → 1
+            kp_scale = 1.0 - alpha           # 1 → 0
+            # kd 는 kd_hold 로 (감쇠 유지). alpha 가 커질수록 kp 만 줄어듦.
+            for idx, motor_id in enumerate(real_joints):
+                self.msg.motor_cmd[motor_id].mode = 1
+                self.msg.motor_cmd[motor_id].q   = float(hold_q[idx])
+                self.msg.motor_cmd[motor_id].dq  = 0.0
+                self.msg.motor_cmd[motor_id].kp  = float(kp0[idx] * kp_scale)
+                self.msg.motor_cmd[motor_id].kd  = float(kd_hold)
+                self.msg.motor_cmd[motor_id].tau = 0.0
+            self.msg.crc = self.crc.Crc(self.msg)
+            self.lowcmd_publisher.Write(self.msg)
+            time.sleep(self.control_dt)
+
+        # 최종: kp=0, kd=kd_hold 상태로 잠깐 더 유지해 잔여 속도 감쇠 (부드러운 정지).
+        settle_steps = int(0.5 / self.control_dt)
+        for _ in range(settle_steps):
+            for idx, motor_id in enumerate(real_joints):
+                self.msg.motor_cmd[motor_id].mode = 1
+                self.msg.motor_cmd[motor_id].q   = 0.0
+                self.msg.motor_cmd[motor_id].dq  = 0.0
+                self.msg.motor_cmd[motor_id].kp  = 0.0
+                self.msg.motor_cmd[motor_id].kd  = float(kd_hold)
+                self.msg.motor_cmd[motor_id].tau = 0.0
+            self.msg.crc = self.crc.Crc(self.msg)
+            self.lowcmd_publisher.Write(self.msg)
+            time.sleep(self.control_dt)
+        logger_mp.info("[G1_29_ArmController] damp_to_release 완료 — 팔 부드럽게 힘 빠짐.")
+
+    def stop(self) -> None:
+        """루프를 안전하게 종료하고 스레드를 join.
+
+        주의: hoist 모드 종료 시에는 이 stop() 전에 damp_to_release() 를 먼저
+        호출해야 팔이 부드럽게 내려간다 (worker_g1_ctrl.stop 에서 처리).
+        damp_to_release 가 이미 _stop_event.set + publish_thread.join 했어도
+        아래 호출은 멱등(이미 끝난 thread join 은 즉시 반환)이라 안전.
+        """
+        self._stop_event.set()
+        try:
+            if self.subscribe_thread.is_alive():
+                self.subscribe_thread.join(timeout=1.0)
+        except Exception:
+            pass
+        try:
+            if self.publish_thread.is_alive():
+                self.publish_thread.join(timeout=1.0)
+        except Exception:
+            pass
 
 
 class G1_29_JointWaistIndex(IntEnum):
