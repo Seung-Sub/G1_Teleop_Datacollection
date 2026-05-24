@@ -183,3 +183,10 @@ python scripts/verify_quest3.py --rate 2.0 --watch
 - 헤드셋 안 설정 → Devices → Controllers 활성 / Hand tracking 비활성
 - main.py 에 `--vr-input controller` 지정 (default 는 hand-tracking)
 - Vuer 페이지에서 "Enter VR" 버튼 클릭해야 CONTROLLER_MOVE 이벤트 시작
+- **vuer 0.0.60 client JS 가 hand-tracking 을 hardcode 로 요청**해 Quest 가 hand 우선 모드로
+  떨어지면 controller 가 잡혀도 demote 됨. INSTALL.md §3-3 의 `python scripts/patch_vuer_xr.py disable`
+  적용되어 있는지 `status` 명령으로 확인 (`PATCHED (handTracking disabled)` 표시).
+
+### Vuer "Enter VR" 후 WebSocket 연결 실패
+- vuer 0.0.60 의 client JS 가 WebSocket URL 에 port 를 누락해 Quest 가 wss://...:443 으로 연결 시도 → 실패.
+  동일 patch script (`patch_vuer_xr.py disable`) 가 port 누락 bug 도 함께 수정.

@@ -63,9 +63,13 @@ python main.py --help
 `--help` 가 표시해야 하는 핵심 flags:
 - `--hand {inspire,dex3}`
 - `--camera <auto|zed|realsense|none|serial>`
+- `--cameras-config <path>`    ← Phase K7 (멀티 카메라 yaml)
 - `--vr-input {hand,controller}`
 - `--waist {hmd,fixed}`  ← Phase F
 - `--head  {dxl,off}`    ← Phase F
+- `--tactile {off,on}`   ← Phase K8 (DEX3 press_sensor_state)
+- `--lower-body {hoist,loco}`  ← Phase N
+- `--gait {off,thumbstick}` / `--gait-stick {split,left,right}`  ← Phase N (loco 보행)
 - `--no-robot`            ← Phase F
 - `--zed-mode {direct,stream}`
 - `--thumb-bend / --thumb-yaw`
@@ -198,6 +202,7 @@ for n in ['camera_shm','television_shm','quest_controller_shm','robot_obs_shm','
 - Vuer 가 `CONTROLLER_MOVE` 이벤트를 발생시키려면 사용자가 컨트롤러를 들고 있어야 함
 - 헤드셋 내부 옵션: 'Controllers' 활성, 'Hands' 비활성 (또는 controller mode 우선)
 - 본 코드는 `--vr-input controller` 시 `MotionControllers` 컴포넌트만 upsert (television.py:236)
+- **vuer 0.0.60 client JS 가 hand-tracking 을 hardcode 요청 → Quest 가 controller demote**. 본 워크스페이스의 `scripts/patch_vuer_xr.py disable` 적용 필요 (`status` 로 `PATCHED` 확인). pro4000 측에도 동일 적용
 
 ### vr_freq = 0
 - worker_vr 가 죽었거나 Vuer 가 event 못 받는 상태

@@ -119,9 +119,10 @@ Unitree **G1** 휴머노이드 (양손 **Inspire** 또는 **DEX3**) 를 **Meta Q
 | Eval entry | `evaluate.py` | 별도 conda env 에서 GR00T 정책 평가 (lag-compensate) |
 | VR 입력 | `open_television/television.py`, `tv_wrapper.py`, `workers/worker_vr.py` | Vuer 이벤트 → SHM, OpenXR→Robot 기저 변환 |
 | IK | `g1_control/g1_ik.py`, `workers/worker_g1_ik.py` | Pinocchio+CasADi IPOPT, clutch + recovery + waist clutch |
-| G1 본체 | `g1_control/g1_whole_control.py`, `workers/worker_g1_ctrl.py` | LowCmd_/LowState_ DualRate 50/300Hz |
+| G1 본체 | `g1_control/g1_whole_control.py`, `workers/worker_g1_ctrl.py` | LowCmd_/LowState_ DualRate 50/300Hz, `damp_to_release` 안전 종료 |
+| 하반신 (loco) | `workers/worker_loco.py` | `--lower-body loco` 시 LocoClient (rt/arm_sdk + thumbstick→Move) |
 | 머리 | `g1_control/g1_head_dynamixel.py` | XL 시리즈 2모터 syncwrite (`--head dxl`) |
-| 손 | `hand_control/robot_hand_inspire.py`, `robot_hand_dex3.py`, `workers/worker_hand_ctrl.py` | DDS, controller-mode trigger toggle, hand-mode retargeting |
+| 손 | `hand_control/robot_hand_inspire.py`, `robot_hand_dex3.py`, `workers/worker_hand_ctrl.py` | DDS, controller-mode trigger toggle, hand-mode retargeting, DEX3 rate-limit + 좌우 거울대칭 |
 | 손 터치 | `workers/worker_hand_dds.py` | Inspire Modbus (DEX3 미해당) |
 | 카메라 | `workers/worker_zed.py`, `worker_camera.py`, `utils/camera_discovery.py` | direct/stream, RealSense first auto-detect |
 | 정렬 | `utils/raw_stream.py`, `utils/align.py`, `utils/record_collectors.py` | RawStreamBuffer dedup + interp_to_axis + common_time_axis |
@@ -167,27 +168,33 @@ conda create -n teleop python=3.8 -c conda-forge -y && conda activate teleop
 
 # 2) core (pinocchio + casadi 는 conda-forge, 나머지는 pip)
 conda install -c conda-forge -y pinocchio casadi
-pip install 'numpy<2' scipy 'opencv-python<4.11' pyarrow pandas pyyaml 'imageio[ffmpeg]' pyqt5
+pip install 'numpy<2' scipy 'opencv-contrib-python-headless<4.11' pyarrow pandas pyyaml 'imageio[ffmpeg]' pyqt5
+# opencv-contrib-python-headless: cv2.aruco 포함 + Qt 번들 없음 (PyQt5 와의 충돌 회피)
 
-# 3) Vuer (Python 3.8 호환 monkey-patch 포함 — INSTALL.md §3 참고)
-pip install --no-deps 'vuer==0.0.60' 'params_proto'
+# 3) Vuer (params_proto 는 2.x 라인으로 pin — 3.x 에서 vuer 0.0.60 이 필요로 하는 `Flag` symbol 제거됨)
+pip install --no-deps 'vuer==0.0.60' 'params_proto>=2.12,<3.0'
 pip install aiohttp aiohttp-cors websockets msgpack dotvar pillow
-# params_proto 의 envvar.py 에 'from __future__ import annotations' 삽입
 
-# 4) Unitree SDK + DDS + Dynamixel + logging
+# 4) Unitree SDK + Dynamixel + logging (cyclonedds 는 unitree_sdk2py 가 dep 으로 자동 설치)
 git clone https://github.com/unitreerobotics/unitree_sdk2_python.git ~/unitree_sdk2_python
 pip install -e ~/unitree_sdk2_python
-pip install cyclonedds dynamixel_sdk logging_mp
+pip install dynamixel_sdk logging_mp
 # logging_mp 에 get_logger/basic_config alias 추가 — INSTALL.md §4-5
 
 # 5) 카메라 SDK (옵션)
 pip install pyrealsense2                       # RealSense
 # ZED: ZED SDK 설치 후 python /usr/local/zed/get_python_api.py
 
-# 6) 워크스페이스
+# 6) 워크스페이스 (setup.py 의 torch / scikit-learn / nlopt / 등 함께 설치 — 수십 분)
 pip install -e .
 
-# 7) 검증
+# 7) Vuer WebXR hand-tracking 기본값 OFF 패치 (controller 모드 필수)
+#    vuer 0.0.60 client JS 가 hand-tracking 을 hardcode 로 요청 → Quest 가 hand 우선 모드로
+#    전환하면서 controller 입력이 demote 됨. 또 WebSocket URL 의 port 가 누락된 bug 도 함께 패치.
+python scripts/patch_vuer_xr.py disable
+python scripts/patch_vuer_xr.py status   # PATCHED 표시 확인
+
+# 8) 검증
 QT_QPA_PLATFORM=offscreen python scripts/verify_offline.py
 # → SUMMARY  PASS=9  FAIL=0
 ```
@@ -202,32 +209,38 @@ Quest 3 USB 연결은 별도 단계 — [`docs/QUEST3_SETUP.md`](docs/QUEST3_SET
 ### 5-1. `main.py` 핵심 옵션
 
 ```text
---hand     {inspire, dex3}            손 하드웨어 (default: inspire)
---camera   {auto, zed, realsense,     'auto' 면 RealSense 우선 자동감지 → ZED fallback.
-            none, <serial>}            'none' 카메라 없이. serial 직접 지정 가능.
---camera-role  ego (default)          멀티-cam 확장용 stub
---zed-mode {direct, stream}           direct=USB, stream=set_from_stream(legacy)
---vr-input {hand, controller}         (default: hand)
---waist    {hmd, fixed}               HMD→waist 매핑 활성 / 고정
---head     {dxl, off}                 Dynamixel head 사용 / 미사용
---thumb-bend, --thumb-yaw  (0.0~1.0)  controller-mode 엄지 사전 자세
---no-robot                            G1/hand worker 생략 (set_g1/set_hand 자동 set)
+--hand        {inspire, dex3}            손 하드웨어 (default: inspire)
+--camera      {auto, zed, realsense,     'auto' 면 RealSense 우선 자동감지 → ZED fallback.
+               none, <serial>}            cameras.yaml 비어있을 때만 사용 (단일 카메라).
+--camera-role ego (default)              cameras.yaml 없이 운용 시 role 라벨
+--zed-mode    {direct, stream}           direct=USB, stream=set_from_stream(legacy)
+--cameras-config <path>                  multi-camera 매핑 yaml (default: utils/cameras.yaml)
+--vr-input    {hand, controller}         (default: hand)
+--waist       {hmd, fixed}               HMD→waist 매핑 활성 / 고정
+--head        {dxl, off}                 Dynamixel head 사용 / 미사용
+--tactile     {off, on}                  DEX3 press_sensor_state 로깅 (실 device 시퀀스 length 측정용)
+--lower-body  {hoist, loco}              hoist=rt/lowcmd (호이스트 현수 전제),
+                                         loco=rt/arm_sdk (motion mode, 내장 LocoClient 가 leg/waist 제어)
+--gait        {off, thumbstick}          (loco 전용) thumbstick→LocoClient.Move 보행
+--gait-stick  {split, left, right}       (gait=thumbstick) stick 매핑 방식
+--thumb-bend, --thumb-yaw  (0.0~1.0)     controller-mode 엄지 사전 자세
+--no-robot                               G1/hand worker 생략 (set_g1/set_hand 자동 set)
 ```
 
 ### 5-2. 자주 쓰는 조합
 
 ```bash
-# 일반 운용 (DEX3 + RealSense + controller-mode, HMD 목에 걸고)
-python main.py --hand dex3 --camera auto --vr-input controller \
-               --waist hmd --head dxl --thumb-bend 0.5 --thumb-yaw 0.5
+# 일반 운용 (DEX3 + RealSense 멀티 + controller-mode, HMD 목에 걸고, hoist 현수)
+python main.py --hand dex3 --camera realsense --vr-input controller \
+               --waist fixed --head off --lower-body hoist
 
 # Inspire + ZED stereo + waist 고정 (조각 작업 등 허리 안정 필요)
 python main.py --hand inspire --camera zed --vr-input controller \
-               --waist fixed --head dxl
+               --waist fixed --head dxl --lower-body hoist
 
-# 데이터 수집 만 (머리 흔들림 없이)
+# loco 모드 (내장 LocoClient + thumbstick 보행) — Debug Mode 아닌 motion control 진입 필요
 python main.py --hand dex3 --camera realsense --vr-input controller \
-               --waist fixed --head off
+               --waist fixed --head off --lower-body loco --gait thumbstick
 
 # Quest3 검증 only (G1/hand 없이)
 python main.py --no-robot --vr-input controller --camera none \
@@ -238,15 +251,22 @@ python main.py --no-robot --vr-input controller --camera none \
 
 ### 6-1. 운용 흐름
 
-1. 로봇 ON, G1 / hand / DXL Ethernet/USB 연결
-2. 카메라 USB 연결 (자동감지 됨)
+1. 로봇 ON, G1 / hand / DXL Ethernet/USB 연결. **hoist 운용 시 호이스트 현수 + 발 가벼운 접지**.
+2. 카메라 USB 연결 (autodetect — `utils/cameras.yaml` 에 serial 매핑).
 3. Quest 3 PC 에 USB 유선 연결 — `adb devices` 가 `device` 상태인지 확인
    ([docs/QUEST3_SETUP.md](docs/QUEST3_SETUP.md))
-4. `python main.py --hand dex3 --camera auto --vr-input controller --waist hmd`
-5. GUI 띄워지면 G1 → Hand → VR 순서로 버튼 클릭 → adb reverse 자동 실행
-6. Quest 3 헤드셋 내 브라우저에서 `https://127.0.0.1:8012` 접속 → "Enter VR"
-7. GUI START 버튼 → worker FSM RUN 진입
-8. 컨트롤러 **Grip 누른 채** 자연스러운 자세 잡고 조작 시작
+4. G1 리모컨 **L2+R2 → L2+A** 로 **Debug Mode** 진입 (hoist 모드 필수 — 내장 컨트롤러 OFF).
+5. `python main.py --hand dex3 --camera realsense --vr-input controller --waist fixed --head off --lower-body hoist`
+6. GUI 띄워지면 **G1 → Hand → VR** 순서로 connector 버튼 클릭:
+   - G1 클릭 후 리모컨 **start → A** (zero_torque → default_pos 통과)
+   - Hand 는 DEX3 양손 init (펴진 자세)
+   - VR 클릭 시 `adb reverse tcp:8012` 자동 실행
+7. Quest 3 헤드셋 내 브라우저에서 `https://127.0.0.1:8012` 접속 (자기서명 cert 우회) → "Enter VR".
+   - patch_vuer_xr.py 적용된 상태면 controller 모드로 자동 진입 (hand-tracking 차단됨)
+   - HMD 안에 ego 카메라 영상 + 컨트롤러 가상 모델 보이면 정상
+8. **HMD 를 목에 걸기** (Quest 의 proximity sensor 자동 sleep 옵션은 꺼두기).
+9. GUI **START** 버튼 → worker FSM RUN 진입.
+10. 컨트롤러 **Grip 누른 채** 자연스러운 자세 잡고 조작 시작 — head-yaw 정렬 + delta clutch 적용.
 
 ### 6-2. 데이터 수집
 
@@ -270,14 +290,47 @@ python main.py --no-robot --vr-input controller --camera none \
 
 | 버튼 / 입력 | 동작 |
 |---|---|
-| **좌/우 Squeeze (grip)** | 누른 동안만 EE clutch 추종 (떼면 freeze) |
+| **좌/우 Squeeze (grip)** | 누른 동안만 EE clutch 추종 (떼면 freeze). 다시 잡으면 새 anchor 캡처 |
 | **좌/우 Trigger** | rising-edge 마다 해당 손 grasp toggle (close↔open) |
 | **HMD orientation** | grip 누른 동안 (R_delta) waist 매핑 (`--waist hmd`) |
 | **Right A** | Ready pose 복귀 (3초 ease + 입력 lockout) |
 | **Right B** | SET (task_name 은 GUI 에서 미리 입력) |
 | **Left X** | Record start toggle (RECORDING 중이면 early-stop+save) |
 | **Left Y** | Drop (현 에피소드 폐기) |
-| **좌/우 Thumbstick** | 미사용 |
+| **좌/우 Thumbstick** | (`--gait thumbstick`) loco 모드 보행 (vx/vy/wz → LocoClient.Move) |
+
+### 7-1. SE(3) clutch 알고리즘 (controller-mode)
+
+PART6 에 따라 grip rising-edge 에서 **HMD head yaw** 를 한 번 캡처해
+**`R_yaw_align`** 으로 고정한 뒤, 컨트롤러 변위를 회전/병진 따로 분리해서 EE 에 적용
+(`workers/worker_g1_ik.py` § `_yaw_align_from_head` + grip-engage 블록):
+
+```
+R_yaw_align  = Rz(head_yaw_at_grip_engage)
+R_rel        = R_yaw_align · (R_ctrl_now · R_ctrl_anchorᵀ) · R_yaw_alignᵀ
+Δp           = R_yaw_align · (p_ctrl_now − p_ctrl_anchor)
+R_ee_target  = R_rel · R_ee_anchor
+p_ee_target  = p_ee_anchor + Δp
+```
+
+효과: HMD 를 목에 걸어 약간 기울어진 상태에서 컨트롤러를 들어도, 사용자의 “앞/옆”
+감각이 G1 base frame 의 앞/옆과 정합. recovery (Right A) 후엔 `R_yaw_align` 이
+None 으로 리셋되어 다음 grip 시 재캡처.
+
+### 7-2. DEX3 안전성
+
+`hand_control/robot_hand_dex3.py` 가 명령 publish 단계에서:
+
+- **rate-limit** `_STEP_MAX = 0.18 rad/cycle` — trigger toggle 시 양손 갑작스러운 close 충격 방지
+- **position error cap** `_MAX_POS_ERR = 0.30 rad` — 상태값 정체 / 비정상 점프 시 폭주 차단
+- **좌우 거울대칭 정정** — 동일 grasp 의도가 좌/우 손에서 실제로 같은 모양이 되도록 Thumb2/Index/Middle 의 close 방향 부호 반전 (DEX3-1 공식 spec)
+- **가동범위**: Index0/Mid0 = ±90° (1.571 rad), `_LIMIT_MARGIN = 0.97` 로 hard limit 직전 clamp
+
+### 7-3. 안전 종료 (damp_to_release)
+
+`g1_control/g1_whole_control.py.damp_to_release(ramp_sec=2.5, kd_hold=5.0)` 가
+`q` 종료 시 / SIGTERM 시 kp 를 1→0 으로 cosine ramp 하면서 kd 만 유지 →
+사용자가 hoist 풀기 전까지 G1 이 갑자기 떨어지지 않음.
 
 > `--vr-input hand` (hand-tracking) 모드는 5 finger tip 만 SHM 으로 노출하는 현재
 > 구조상 Inspire 만 정상 retargeting. DEX3 hand-tracking 은 25 landmark 필요해 
@@ -398,9 +451,9 @@ python scripts/verify_quest3.py --rate 2.0 --watch
 
 ### 10-3. 실 운용 검증
 
-로봇 연결 후:
+로봇 연결 후 (hoist 현수 + Debug Mode 진입 후):
 ```bash
-python main.py --hand dex3 --camera auto --vr-input controller --waist hmd
+python main.py --hand dex3 --camera realsense --vr-input controller --waist fixed --head off --lower-body hoist
 ```
 GUI 의 freq_shm 값 (`g1_freq`, `hand_freq`, `vr_freq`, `camera_freq`) 가 안정적인지
 확인. 데이터 수집 시 parquet 의 `raw_ts_*` 컬럼이 stream 간 phase offset 을 보여줘
@@ -415,7 +468,8 @@ GUI 의 freq_shm 값 (`g1_freq`, `hand_freq`, `vr_freq`, `camera_freq`) 가 안�
 | `unauthorized` | 케이블 재연결 → 헤드셋 dialog 수락 |
 | Vuer 페이지 안 열림 | `adb reverse tcp:8012 tcp:8012`, cert.pem 존재 확인 |
 | "Horizon Link 가 실행 중인가요?" | Linux 무관 메시지 — 무시 |
-| controller 입력 안 잡힘 | `--vr-input controller`, 헤드셋 안 controller 활성 |
+| controller 입력 안 잡힘 (hand-tracking 모드만 열림) | vuer 0.0.60 client JS 가 hand-tracking 을 hardcode 요청. `python scripts/patch_vuer_xr.py disable` 적용 후 `status` 확인. Quest 가 controller-only 모드로 진입함 |
+| Vuer 브라우저 “Enter VR” 후 WebSocket 연결 실패 | vuer 0.0.60 의 client URL 에 port 누락 (Quest 가 wss://...:443 시도). 동일 patch script 가 함께 수정 |
 
 자세히는 [`docs/QUEST3_SETUP.md`](docs/QUEST3_SETUP.md)
 
@@ -423,7 +477,11 @@ GUI 의 freq_shm 값 (`g1_freq`, `hand_freq`, `vr_freq`, `camera_freq`) 가 안�
 | 증상 | 해법 |
 |---|---|
 | DDS 못 잡음 | `utils/lan_config.yaml` 의 `network_interface` 확인, G1 와 같은 LAN |
-| DEX3 grasp 가 약함 | `hand_control/robot_hand_dex3.py` 의 kp/kd 또는 URDF limit constant 조정 |
+| G1 init 시 joint index 어긋남 | `G1_29_JointIndex` enum 이 arm_sdk weight 용으로 35 entry 를 가짐. 본체 init 은 `list(...)[:29]` 만 사용 (worker_g1_ctrl 에서 처리됨) |
+| DEX3 grasp 가 약함 | `hand_control/robot_hand_dex3.py` 의 kp/kd 또는 `hand_control/DEX3-1_spec.md` 의 가동범위/한계 참고 |
+| DEX3 state subscriber 가 가끔 0 msg | DEX3 보드 publish 자체가 fragile. `worker_hand_ctrl` 초기화 시 timeout 후 release-pose 로 가더라도 다음 메시지가 오면 자연 복귀. 케이블/전원 우선 점검 |
+| DEX3 양손 grasp 가 거울대칭 안 됨 | 구 코드 잔재일 수 있음 — `robot_hand_dex3.py` 가 좌/우 부호 반전 (Thumb2/Index/Middle) 적용된 버전인지 확인 |
+| 종료 시 G1 가 갑자기 떨어짐 | `g1_whole_control.damp_to_release` 가 호출됐는지 (main.py SIGTERM/exit 경로) 확인. hoist 풀기 전엔 항상 ramp 종료 |
 | Inspire 가 안 닫힘 | `robot_hand_inspire.py` 의 normalize range (0~1.7 등) 확인 |
 | 손 모양이 어색 | controller-mode 면 `--thumb-bend / --thumb-yaw` 조정 |
 
@@ -431,8 +489,11 @@ GUI 의 freq_shm 값 (`g1_freq`, `hand_freq`, `vr_freq`, `camera_freq`) 가 안�
 | 증상 | 해법 |
 |---|---|
 | `--camera auto` 가 'none' fallback | USB / 권한 / SDK 설치 확인. `python -c "from utils.camera_discovery import discover_realsense, discover_zed; print(discover_realsense(), discover_zed())"` |
+| 멀티-카메라 serial 매핑 어긋남 | `utils/cameras.yaml` 의 `role: ego / wrist_l / wrist_r ↔ serial` 확인. D405 가 lsusb 안 잡히면 USB-C 포트 또는 케이블 우선 교체 |
 | pyzed import 실패 | ZED SDK 설치 + `python /usr/local/zed/get_python_api.py` |
 | RealSense permission denied | udev rule (`/etc/udev/rules.d/99-realsense-libusb.rules`) |
+| GUI ego view 가 검은 화면 | workspace_mask 가 all-zero 상태로 적용되면 까맣게 나옴. `gui/ui_launcher.py` 의 `APPLY_MASK_IN_GUI` + `mask_left_flat.any()` guard 동작 확인 |
+| `import cv2` 직후 Qt 플러그인 충돌 (`Could not load the Qt platform plugin "xcb"`) | `opencv-python` 의 번들 Qt 가 PyQt5 와 충돌. `pip uninstall opencv-python && pip install 'opencv-contrib-python-headless<4.11'` 로 교체 (INSTALL.md §4 참고) |
 
 ### 데이터 수집
 | 증상 | 해법 |
