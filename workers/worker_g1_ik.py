@@ -37,6 +37,34 @@ HEAD_READY_RAD    = np.array([0.0, -0.17486])
 RECOVERY_DURATION_SEC = 3.0
 
 
+def _yaw_align_from_head(head_mat):
+    """grip engage 시점의 HMD pose 에서 yaw 정렬 회전(3x3) 을 계산.
+
+    head_mat 는 robot-convention(z-up, x-front, y-left) 기저. 사용자가 향한 수평
+    yaw 의 *역회전* 을 곱하면 사용자 정면이 로봇 +x(정면) 로 정렬된다.
+
+    yaw 추출은 euler 'zyx' 분해의 첫 성분(yaw) 을 사용한다. 검증 결과 순수
+    yaw+pitch 회전에서 euler-zyx yaw 는 pitch 크기와 무관하게 정확하다 (forward 축
+    수평투영 방식은 pitch 가 크면 yaw 를 왜곡 — pitch=-60° 에서 30°→49° 오차).
+    HMD 를 목에 걸면 pitch 는 크지만 roll 은 작으므로 euler-zyx 가 안정적.
+
+    반환: R_align (3,3) — p_aligned = R_align @ p_world. world frame yaw 오차 제거.
+    """
+    Rh = head_mat[:3, :3]
+    try:
+        yaw = float(R.from_matrix(Rh).as_euler('zyx')[0])
+    except Exception:
+        # degenerate (비정상 행렬) → forward 수평투영 폴백
+        fwd = Rh[:, 0]
+        yaw = float(np.arctan2(fwd[1], fwd[0]))
+    if not np.isfinite(yaw):
+        return np.eye(3)
+    c, s = np.cos(-yaw), np.sin(-yaw)      # 역회전
+    return np.array([[c, -s, 0.0],
+                     [s,  c, 0.0],
+                     [0.0, 0.0, 1.0]])
+
+
 def _events_snapshot(shared_event, g1_initialized: bool) -> EventsSnapshot:
     return EventsSnapshot(
         shutdown = shared_event['shutdown'].is_set(),
@@ -101,6 +129,11 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand", waist_mod
     waist_anchor_head = None
     waist_anchor_q    = None
     target_waist_q    = None
+    # Head-yaw 정렬 (개선안 ①): grip engage 시점의 HMD yaw 를 1회 캡처해
+    # 컨트롤러 변위/회전을 "사용자 정면 = 로봇 정면" 으로 정렬한다. 이로써 사용자가
+    # 어느 방향으로 서서 VR 세션을 시작했든(=VR world frame 이 어디로 회전됐든)
+    # 직관적 조작이 가능. 좌우 클러치가 공유 (양손 동시 engage 시 먼저 잡힌 yaw 유지).
+    R_yaw_align = None   # (3,3) — world->aligned 회전. None 이면 미설정(정렬 비활성).
     # Ready 버튼 edge detection
     prev_right_a_btn = False
     # Recovery state (cosine ease + controller 입력 lockout)
@@ -255,6 +288,7 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand", waist_mod
                                 T_ee_anchor_l   = T_ee_anchor_r   = None
                                 waist_anchor_head = None
                                 waist_anchor_q    = None
+                                R_yaw_align       = None
                                 # Right-A 는 현재값으로 sync — 사용자가 버튼을 계속 누르고 있어도
                                 # 즉시 새 recovery 가 트리거되지 않도록 함.
                                 prev_right_a_btn = float(ctrl_data["right_buttons"][0]) >= BUTTON_THRESH
@@ -297,9 +331,22 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand", waist_mod
                             if not prev_grip_l:
                                 T_ctrl_anchor_l = T_ctrl_l_now.copy()
                                 T_ee_anchor_l   = T_ee_target_l.copy()
+                                # Head-yaw 정렬 (개선안 ①): 양손 모두 grip 떼진 상태에서
+                                # 새로 잡힐 때만 head yaw 를 1회 캡처. 한쪽이 이미 잡고
+                                # 있으면(R_yaw_align != None) 기존 정렬 유지 → 양손 일관.
+                                if R_yaw_align is None:
+                                    R_yaw_align = _yaw_align_from_head(head_pose)
                                 logger_mp.info("[G1_IK] LEFT grip ENGAGE")
-                            delta_l = T_ctrl_l_now @ fast_mat_inv(T_ctrl_anchor_l)
-                            T_ee_target_l = delta_l @ T_ee_anchor_l
+                            # Clutch delta: 위치/회전 분리 + head-yaw 정렬.
+                            #  - 위치: world 평행이동 차분에 R_yaw_align 적용해 사용자
+                            #          정면 기준으로 정렬 (p_t = p_t^a + R_align·(p_h - p_h^a)).
+                            #  - 회전: 컨트롤러 상대회전도 R_align 으로 정렬한 뒤 EE 에 합성.
+                            R_rel_l = T_ctrl_l_now[:3, :3] @ T_ctrl_anchor_l[:3, :3].T
+                            R_rel_l = R_yaw_align @ R_rel_l @ R_yaw_align.T
+                            dp_l    = R_yaw_align @ (T_ctrl_l_now[:3, 3] - T_ctrl_anchor_l[:3, 3])
+                            T_ee_target_l = np.eye(4)
+                            T_ee_target_l[:3, :3] = R_rel_l @ T_ee_anchor_l[:3, :3]
+                            T_ee_target_l[:3,  3] = T_ee_anchor_l[:3, 3] + dp_l
                         else:
                             if prev_grip_l:
                                 logger_mp.info("[G1_IK] LEFT grip RELEASE -> freeze EE target")
@@ -313,13 +360,24 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand", waist_mod
                             if not prev_grip_r:
                                 T_ctrl_anchor_r = T_ctrl_r_now.copy()
                                 T_ee_anchor_r   = T_ee_target_r.copy()
+                                if R_yaw_align is None:
+                                    R_yaw_align = _yaw_align_from_head(head_pose)
                                 logger_mp.info("[G1_IK] RIGHT grip ENGAGE")
-                            delta_r = T_ctrl_r_now @ fast_mat_inv(T_ctrl_anchor_r)
-                            T_ee_target_r = delta_r @ T_ee_anchor_r
+                            # 위치/회전 분리 + head-yaw 정렬 (왼팔과 동일, 주석은 왼팔 참고)
+                            R_rel_r = T_ctrl_r_now[:3, :3] @ T_ctrl_anchor_r[:3, :3].T
+                            R_rel_r = R_yaw_align @ R_rel_r @ R_yaw_align.T
+                            dp_r    = R_yaw_align @ (T_ctrl_r_now[:3, 3] - T_ctrl_anchor_r[:3, 3])
+                            T_ee_target_r = np.eye(4)
+                            T_ee_target_r[:3, :3] = R_rel_r @ T_ee_anchor_r[:3, :3]
+                            T_ee_target_r[:3,  3] = T_ee_anchor_r[:3, 3] + dp_r
                         else:
                             if prev_grip_r:
                                 logger_mp.info("[G1_IK] RIGHT grip RELEASE -> freeze EE target")
                         prev_grip_r = grip_r
+
+                        # 양손 모두 grip 떼지면 yaw 정렬 리셋 → 다음 engage 때 새 yaw 캡처.
+                        if (not grip_l) and (not grip_r):
+                            R_yaw_align = None
 
                         # ---- waist clutch (HMD delta -> waist target) ----------
                         # waist_mode='fixed': HMD 매핑 비활성, target = init waist q (0 벡터) 고정.
