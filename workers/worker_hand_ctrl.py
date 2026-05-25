@@ -192,8 +192,40 @@ def worker_hand_ctrl(shared_event, shm_name, shared_lock,
                     )
                     logger_mp.info(f"[REPLAY INIT] Loading {parquet_path}")
 
+                    # ── 존재하지 않는 에피소드 방어 ──────────────────────────────
+                    # 사용자가 GUI replay 입력창에 수집 범위를 벗어난 번호(예: 0~2 만
+                    # 수집했는데 3)를 넣으면 parquet 가 없어 pd.read_parquet 가
+                    # FileNotFoundError 를 던지고 WORKER_HAND 프로세스가 죽어 손 제어가
+                    # 중단됐다(worker_g1_ik 도 동일 — 양쪽 동시 크래시). 파일이 없으면
+                    # 크래시 대신: 에러 로그 + replay 플래그 클리어 후 다음 루프로 복귀한다.
+                    # (worker_g1_ik 의 동일 방어와 짝을 이룸.)
+                    if not os.path.isfile(parquet_path):
+                        logger_mp.error(
+                            f"[REPLAY] 파일 없음: {parquet_path} — replay_idx={replay_idx} "
+                            f"가 수집된 에피소드 범위를 벗어났습니다. replay 취소."
+                        )
+                        rm = record_mode_shm.read_data()
+                        rm["replay"] = False
+                        rm["done"]   = False
+                        record_mode_shm.write_data(**rm)
+                        replay_demo_init = False
+                        rate.sleep()
+                        continue
+
                     # 4) DataFrame 로드
-                    df = pd.read_parquet(parquet_path, engine="pyarrow")
+                    try:
+                        df = pd.read_parquet(parquet_path, engine="pyarrow")
+                    except Exception as e:
+                        logger_mp.error(
+                            f"[REPLAY] parquet 로드 실패: {parquet_path} ({e}). replay 취소."
+                        )
+                        rm = record_mode_shm.read_data()
+                        rm["replay"] = False
+                        rm["done"]   = False
+                        record_mode_shm.write_data(**rm)
+                        replay_demo_init = False
+                        rate.sleep()
+                        continue
                     # 5) NumPy 배열로 변환
                     #    - observation/state도 필요하면 같은 식으로 df["observation.state"]
                     replay_actions   = np.stack(df["action"].to_numpy()).astype(np.float64)

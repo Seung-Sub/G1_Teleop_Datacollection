@@ -566,7 +566,40 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand", waist_mod
                     )
                     logger_mp.info(f"[REPLAY INIT] Loading {parquet_path}")
 
-                    df = pd.read_parquet(parquet_path, engine="pyarrow")
+                    # ── 존재하지 않는 에피소드 방어 ──────────────────────────────
+                    # 사용자가 GUI replay 입력창에 수집된 범위를 벗어난 번호(예: 0~2 만
+                    # 수집했는데 3)를 넣으면 parquet 파일이 없어 pd.read_parquet 가
+                    # FileNotFoundError 를 던지고, 그게 worker_g1_ik / worker_hand_ctrl
+                    # 프로세스를 통째로 죽여 수집 세션 전체가 중단됐다(arm/hand 제어 불가).
+                    # 파일이 없으면 크래시 대신: 에러 로그 + replay 플래그 클리어 +
+                    # set_start 유지(teleop 계속 가능) 로 우아하게 복귀한다.
+                    if not os.path.isfile(parquet_path):
+                        logger_mp.error(
+                            f"[REPLAY] 파일 없음: {parquet_path} — replay_idx={replay_idx} "
+                            f"가 수집된 에피소드 범위를 벗어났습니다. replay 취소(teleop 유지)."
+                        )
+                        rm = record_mode_shm.read_data()
+                        rm["replay"] = False
+                        rm["done"]   = False
+                        record_mode_shm.write_data(**rm)
+                        replay_demo_init = False
+                        # set_start 는 유지 → teleop 계속 가능. 다음 cycle 에서 teleop 블록 재개.
+                        rate.sleep()
+                        continue
+
+                    try:
+                        df = pd.read_parquet(parquet_path, engine="pyarrow")
+                    except Exception as e:
+                        logger_mp.error(
+                            f"[REPLAY] parquet 로드 실패: {parquet_path} ({e}). replay 취소(teleop 유지)."
+                        )
+                        rm = record_mode_shm.read_data()
+                        rm["replay"] = False
+                        rm["done"]   = False
+                        record_mode_shm.write_data(**rm)
+                        replay_demo_init = False
+                        rate.sleep()
+                        continue
 
                     replay_actions   = np.stack(df["action"].to_numpy()).astype(np.float64)
                     replay_length    = replay_actions.shape[0]
@@ -685,12 +718,33 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand", waist_mod
                         if (_replay_rel_ts is None) or (now - _replay_start_wall >= _replay_rel_ts[-1]):
                             record_mode_data = record_mode_shm.read_data()
                             record_mode_data["replay"] = False
-                            record_mode_data["start"] = False
+                            record_mode_data["start"]  = False
+                            # ── 통제권 복귀 + 자동 recovery 수정 ──────────────────
+                            # 과거: shared_event['set_start'].clear() 로 RUN 을 벗어나
+                            #   (RUN→PAUSE→WAIT_START) g1_ctrl/g1_ik 가 robot_action_shm
+                            #   read/write 를 모두 멈췄다 → replay 후 controller 로 arm 을
+                            #   다시 조작하려면 GUI Start 를 눌러야만 했다.
+                            # 수정 핵심 2가지:
+                            #  (1) set_start 를 유지 → RUN 유지 → replay=False 이므로 위의
+                            #      teleop 블록(set_start.is_set() and not replay and not
+                            #      deploy)이 자동 재개된다. GUI on_replay_episode 가 replay
+                            #      시작 시 set_start.set() 하므로(ui L836) 흐름상 정합.
+                            #  (2) home=True 로 설정 → 다음 cycle 에서 recovery state machine
+                            #      (위 'if home and not _recovery_active')이 트리거되어 arm 이
+                            #      replay 마지막 자세에서 ready-pose 로 3초 cosine ease 로
+                            #      부드럽게 복귀한다. recovery 종료 시 anchor/grip 가 모두
+                            #      리셋되고 home=False 로 클리어되므로(위 ease 종료 블록),
+                            #      사용자가 grip 을 다시 잡는 순간 새 anchor 가 캡처되어
+                            #      곧바로 teleop 으로 이어서 데이터 수집을 재개할 수 있다.
+                            #      (replay 끝 자세에서 급격히 튀지 않도록 하는 안전장치.)
+                            record_mode_data["home"] = True
                             record_mode_shm.write_data(**record_mode_data)
                             replay_demo_init = False
-                            shared_event['set_start'].clear()
+                            # set_start 는 유지 (clear 하지 않음).
 
-                            logger_mp.info("[REPLAY DONE] Finished all frames")
+                            logger_mp.info("[REPLAY DONE] Finished all frames "
+                                           "→ set_start 유지 + home recovery 트리거 "
+                                           "(ready-pose 복귀 후 grip 으로 teleop 재개).")
 
                 # deploy 모드: 이 워커는 IK 를 수행하지 않고, evaluate.py(외부 conda env)
                 # 가 ROBOT_ACTION SHM 에 action 을 직접 publish 한다. 여기서는 단순히
