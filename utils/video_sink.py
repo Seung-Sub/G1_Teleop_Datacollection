@@ -82,6 +82,10 @@ class VideoSink:
             with imageio.get_writer(
                 view_path, format="FFMPEG", mode="I", fps=self.fps,
                 codec="libx264", ffmpeg_params=["-pix_fmt", "yuv420p"],
+                # macro_block_size=1: 기본값 16 이면 640x360 의 360 이 16 배수가 아니라
+                # imageio 가 368 로 자동 패딩(검은 띠 + 16:9 왜곡)함. 1 로 두면 360 정확
+                # 유지. yuv420p 는 가로/세로 2 배수만 요구하는데 360 은 짝수라 안전.
+                macro_block_size=1,
             ) as writer:
                 for frame in frames:
                     writer.append_data(frame)

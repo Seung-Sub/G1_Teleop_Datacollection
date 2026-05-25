@@ -227,7 +227,7 @@ def worker_zed(shared_event, shm_name, shared_lock,
                 bgra_l  = left_mat.get_data()
 
                 bgr_l   = cv2.cvtColor(bgra_l, cv2.COLOR_BGRA2BGR)
-                small_l = cv2.resize(bgr_l, (640,480), interpolation=cv2.INTER_AREA)
+                small_l = cv2.resize(bgr_l, (640,360), interpolation=cv2.INTER_AREA)  # CAMERA_VIEW 통일 360 (16:9 ZED native 종횡비)
                 small_l = np.ascontiguousarray(small_l, dtype=np.uint8)
                 # [추가] 원본 이미지 복사본 저장: 마스킹 전 원본을 보존하기 위해 (원본은 small_l_raw, 마스킹된 것은 small_l)
                 small_l_raw = small_l.copy()
@@ -235,7 +235,7 @@ def worker_zed(shared_event, shm_name, shared_lock,
                 bgra_r  = right_mat.get_data()
 
                 bgr_r   = cv2.cvtColor(bgra_r, cv2.COLOR_BGRA2BGR)
-                small_r = cv2.resize(bgr_r, (640,480), interpolation=cv2.INTER_AREA)
+                small_r = cv2.resize(bgr_r, (640,360), interpolation=cv2.INTER_AREA)  # CAMERA_VIEW 통일 360
                 small_r = np.ascontiguousarray(small_r, dtype=np.uint8)
                 # [추가] 오른쪽 이미지 원본 복사본 저장
                 small_r_raw = small_r.copy()

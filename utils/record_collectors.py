@@ -36,9 +36,13 @@ import logging_mp
 logger_mp = logging_mp.get_logger(__name__)
 
 
-# 공통 정렬 출력 주파수. 학습 측 modality 가 기대하는 control rate 와 일치시킴
-# (G1 ctrl 50Hz 와 동일). 필요 시 worker_record 가 override 가능.
-DEFAULT_OUTPUT_HZ = 50.0
+# 공통 정렬 출력 주파수. 카메라 60fps + hand 100Hz + robot obs 300Hz 구성에서,
+# 가장 낮은 연속 모달리티가 카메라(60Hz)가 되도록 hand 를 100Hz 로 올렸다(이전 50Hz).
+# → 60Hz 저장 시 모든 모달리티가 업샘플 없이 자연스러운 다운샘플/ZOH 정렬된다.
+# (hand 100Hz→60 다운, camera 60→60 그대로, robot 300→60 다운.) 최종 학습용
+# 다운샘플(DP 10Hz, GR00T 15~30Hz)은 60 의 정수 약수(10/15/30/60)라 깔끔.
+# 필요 시 worker_record 가 override 가능.
+DEFAULT_OUTPUT_HZ = 60.0
 
 
 # ============================================================================

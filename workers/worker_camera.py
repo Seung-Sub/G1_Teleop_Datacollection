@@ -45,7 +45,11 @@ def worker_camera(shared_event, shm_name, shared_lock,
     view_shm = SharedMemoryManager(CAMERA_VIEW, shared_lock[lock_key], shm_name[shm_key])
     freq_shm = SharedMemoryManager(WORKER_FREQ, shared_lock["freq_lock"], shm_name["freq_shm"])
 
-    rate = Rate(30.0)
+    # Rate 는 *측정 전용* (tick_hz). 캡처 속도는 wait_for_frames 가 카메라 fps(60)에
+    # 맞춰 블로킹하므로 rate.sleep() 으로 추가 제한하지 않는다. (과거 Rate(30)+sleep 은
+    # 60fps 로 열어도 30Hz 로 묶는 이중 제한 버그였음.) RealSense 권장: 프레임을 device
+    # fps 만큼 빠르게 빼가야 드롭이 없다 → sleep 제거.
+    rate = Rate(60.0)
 
     # RealSense pipeline 설정
     pipeline = rs.pipeline()
@@ -57,8 +61,10 @@ def worker_camera(shared_event, shm_name, shared_lock,
         except Exception as e:
             logger_mp.warning(f"[Realsense:{role}] enable_device({serial}) 실패: {e} — fallback any device")
 
-    # 640x480 @ 30 Hz color (BGR8).
-    config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+    # 640x360 @ 60 Hz color (BGR8). 640x360 = 16:9 (센서 native 종횡비), 3대 동시
+    # 60fps 드롭 0% 실측 검증됨 (check_camera_hw.py). depth 는 enable 안 함 (color-only,
+    # 대역폭/부하 절감 — 실시간 depth 불요).
+    config.enable_stream(rs.stream.color, 640, 360, rs.format.bgr8, 60)
 
     try:
         profile = pipeline.start(config)
@@ -166,7 +172,8 @@ def worker_camera(shared_event, shm_name, shared_lock,
                     break
                 time.sleep(0.05)
 
-            rate.sleep()
+            # rate.sleep() 제거: wait_for_frames(60fps 블로킹)가 속도를 정한다.
+            # sleep 을 추가하면 프레임을 제때 못 빼가 드롭이 생긴다 (RealSense 권장).
 
     except Exception as e:
         logger_mp.error(f"[Realsense:{role}] Unexpected error: {e}")

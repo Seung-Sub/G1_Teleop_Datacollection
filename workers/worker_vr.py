@@ -39,7 +39,10 @@ def worker_vr(shared_event, shm_name, shared_lock, vr_input="hand"):
     freq_shm             = SharedMemoryManager(WORKER_FREQ,        shared_lock["freq_lock"],             shm_name["freq_shm"])
     quest_controller_shm = SharedMemoryManager(QUEST_CONTROLLER,   shared_lock["quest_controller_lock"], shm_name["quest_controller_shm"])
 
-    freq      = 50.0
+    # 50→60Hz: VR controller target 수신/저장 주기. vuer MotionControllers 소스가
+    # 60fps 이고 저장 정렬축도 60Hz 라 60 이 정확한 매칭(업샘플/중복 0). WebXR 최대
+    # 90Hz 이나 vuer 소스 60fps + 저장 60Hz 한계로 60 초과 실익 없음.
+    freq      = 60.0
     period_ns = int(1e9 / freq)
     next_time = time.perf_counter_ns()
     last_time = next_time

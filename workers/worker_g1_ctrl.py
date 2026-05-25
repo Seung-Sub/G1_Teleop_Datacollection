@@ -22,7 +22,10 @@ logger_mp = logging_mp.get_logger(__name__)
 
 # 이중 주파수 사용/ 관측은 빠르게 제어는 느리게 
 OBS_HZ = 300.0
-ACT_HZ = 50.0  # 느린 루프 주파수로 사용
+ACT_HZ = 60.0  # 느린 루프(제어) 주파수. 50→60: VR/IK/저장 60Hz 체인과 일치시켜
+               # action 생성(60)→제어(60) 매칭. arm_sdk engage/disengage/damp ramp 는
+               # 자체 time.sleep 기반 독립 루프라 이 hz 변경에 영향 없음(안전).
+               # OBS_HZ(300)는 그대로 — robot obs 는 이미 충분.
 
 class G1CtrlWorker(DualRateWorker):
     """
