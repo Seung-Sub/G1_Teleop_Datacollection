@@ -44,6 +44,84 @@ logger_mp = logging_mp.get_logger(__name__)
 
 
 # =============================================================================
+# Camera frame ring buffer (Phase B — video temporal history)
+# =============================================================================
+
+class _CameraFrameRing:
+    """Per-camera ring buffer holding (frame_ts_ns, frame_rgb_uint8) entries.
+
+    학습 데이터는 video.delta_indices=[-20, 0] 으로, 20fps 다운샘플 후 -20 = 정확히
+    1.0 초 전 프레임을 의미한다. 카메라가 60fps 로 SHM 갱신되므로 (worker_camera.py
+    L67 enable_stream @60fps), 추론(20Hz slow tick) 시점 마다 ts 기반으로 1초 전
+    프레임을 정확히 pick 하기 위한 ring buffer.
+
+    동시성:
+      - 폴링 thread (60Hz) 가 append (단일 producer)
+      - inference thread (20Hz) 가 pick (단일 consumer)
+      - lock 으로 snapshot 보호 (Python deque append 자체는 thread-safe 하나 ts 검색은
+        스냅샷 일관성 필요).
+
+    Sizing:
+      - 60fps × 1.2s = 72 슬롯. 여유 위해 capacity=120.
+      - 프레임당 360×640×3 = 691 KB. 카메라 3대 × 120 = ~248 MB. 허용 범위.
+
+    Warmup:
+      - 첫 1초간 ring 에 1초 전 ts 의 entry 가 없으면 None 반환 → caller 가 현재
+        프레임 복제로 처리 (학습 step_index<20 시 allow_padding clamp 거동과 일치).
+    """
+
+    def __init__(self, capacity: int = 120, role: str = ""):
+        self._buf: deque = deque(maxlen=capacity)
+        self._lock = threading.Lock()
+        self.role = role
+        self._last_ts: int = 0
+
+    def push(self, ts_ns: int, frame_rgb: np.ndarray) -> bool:
+        """Append (ts, frame) entry. Dedup on identical ts (camera 가 같은 frame 을
+        반복 publish 한 경우). 반환 True = 새 frame 으로 추가, False = dedup."""
+        if ts_ns <= self._last_ts:
+            return False
+        with self._lock:
+            self._buf.append((int(ts_ns), frame_rgb))
+            self._last_ts = int(ts_ns)
+        return True
+
+    def latest(self) -> Optional[tuple]:
+        """가장 최근 (ts, frame) 반환. ring 이 비었으면 None."""
+        with self._lock:
+            if not self._buf:
+                return None
+            return self._buf[-1]
+
+    def pick_at(self, target_ts_ns: int, tol_ns: int = 80_000_000) -> Optional[tuple]:
+        """target_ts 에 가장 가까운 (ts, frame) 반환. tol 안에 들어와야 valid (기본
+        80ms = 카메라 1.5 frame @60fps 여유). ring 에 target_ts 보다 이전 entry 가
+        없거나 가까운 게 tol 밖이면 None.
+
+        구현: target_ts 보다 작거나 같은 entry 중 가장 큰 ts (즉 target 직전의
+        가장 최근 frame — ZOH 의미). 학습 시 다운샘플도 [step-20] = 그 시점의
+        프레임이므로 동일 의미.
+        """
+        with self._lock:
+            if not self._buf:
+                return None
+            # 선형 스캔 (deque, len<=120 라 비용 무시 수준).
+            best = None
+            for ts, fr in self._buf:
+                if ts <= target_ts_ns and (best is None or ts > best[0]):
+                    best = (ts, fr)
+            if best is None:
+                return None
+            if abs(best[0] - target_ts_ns) > tol_ns:
+                return None
+            return best
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._buf)
+
+
+# =============================================================================
 # Frame / observation helpers
 # =============================================================================
 
@@ -111,32 +189,38 @@ def _parts_from_obs(qpos: np.ndarray, hand_qpos: np.ndarray, hand_type: str) -> 
 
 
 def build_obs_dict(task_name: str, qpos: np.ndarray, hand_qpos: np.ndarray,
-                   frames: Dict[str, np.ndarray], hand_type: str,
+                   frames: Dict[str, List[np.ndarray]], hand_type: str,
                    layout, language_key: str) -> dict:
     """N1.7 Gr00tPolicy 용 *중첩* obs dict (공식 권고 — custom robot 은 Gr00tPolicy 직접 사용).
 
     N1.7 Gr00tPolicy.get_action 입력 형식 (gr00t_policy.py L246-342):
         obs = {
-          "video":    { role: (B,T,H,W,C) uint8 },     # T == video delta_indices 길이(=1)
+          "video":    { role: (B,T,H,W,C) uint8 },     # T == video delta_indices 길이
           "state":    { name: (B,T,D) float32 },        # T == state delta_indices 길이(=1)
           "language": { language_key: list[list[str]] } # (B, 1)
         }
-    여기서 B=1, T=1. video uint8 / state float32 보장.
+    여기서 B=1. video T 는 학습 시 video.delta_indices 길이 (g1_dex3_config 는 2).
+    video uint8 / state float32 보장.
 
     layout: build_state_layout(...) 또는 layout_from_modality_json(...) 결과.
             modality.json 의 state 키만 포함 — 학습 데이터셋 layout 과 정합 (차원 자동).
     language_key: policy.language_key (체크포인트서 자동 = 'annotation.human.task_description').
                   하드코딩하지 않고 policy 가 알려주는 키를 써서 학습-추론 정합 보장.
-    frames: {role: rgb_np uint8}. RealSense 'ego'/'wrist_l'/'wrist_r' 또는 ZED 'ego_left' 등.
+    frames: {role: list[rgb_np uint8]} — 각 카메라 별 T 개 frame (학습 delta_indices 순서).
+            예) video.delta_indices=[-20, 0] 이면 [과거(1초 전), 현재] 순서.
+            extract_step_data L41 이 동일 순서 ([step+(-20), step+0]) 로 video 를
+            로드하므로 deploy 도 같은 순서 stack 필요. ★ 순서 중요.
     """
     parts = _parts_from_obs(qpos, hand_qpos, hand_type)
     obs: dict = {"video": {}, "state": {}, "language": {}}
     for name, _dim in layout:
         # (B=1, T=1, D) float32
         obs["state"][name] = parts[name][None, None, :].astype(np.float32)
-    for role, rgb in frames.items():
-        # (B=1, T=1, H, W, C) uint8
-        obs["video"][role] = rgb[None, None, ...].astype(np.uint8)
+    for role, frame_list in frames.items():
+        # frame_list: list of (H, W, C) uint8 frames in delta_indices order.
+        # → np.stack(axis=0) = (T, H, W, C) → [None] = (B=1, T, H, W, C) uint8.
+        stacked = np.stack(frame_list, axis=0).astype(np.uint8)
+        obs["video"][role] = stacked[None, ...]
     # language: (B=1, T=1) = list[list[str]]
     obs["language"][language_key] = [[task_name]]
     return obs
@@ -295,16 +379,33 @@ class Gr00t_Inference:
         self._action_buf          = deque(maxlen=self.window_size)
         self._hand_buf            = deque(maxlen=self.window_size)
 
+        # Phase B: 카메라 frame ring buffer (video.delta_indices=[-20, 0] 지원).
+        # 학습 data: 20fps × -20 = 1.0 초 전. deploy 도 1.0 초 전 frame 을 모델에 전달
+        # 해야 학습-배포 정합. 카메라 60fps SHM 갱신 (worker_camera.py) 을 polling
+        # thread 가 모두 캡처해 ring 에 저장 → slow tick (20Hz) 시점에 ts 기반 pick.
+        # 카메라 role 별 독립 ring (ego/wrist_l/wrist_r 또는 zed 모드의 ego_left/_right).
+        self._video_history_offset_ns: int = 1_000_000_000   # 1.0초 = -20 @ 20fps
+        self._video_history_tol_ns: int = 80_000_000          # 80ms pick tolerance
+        self._cam_rings: Dict[str, _CameraFrameRing] = {
+            role: _CameraFrameRing(capacity=120, role=role) for role in self.camera_roles
+        }
+
         # Lifecycle
         self._stop_event = threading.Event()
         self._slow_thread = threading.Thread(target=self._inference_loop, daemon=True, name="DEPLOY_SLOW")
         self._fast_thread = threading.Thread(target=self._ctrl_loop,      daemon=True, name="DEPLOY_FAST")
+        # Phase B: 60Hz 카메라 frame ring 채우는 별도 polling thread. slow tick
+        # 추론 지연과 무관하게 ring 이 늘 채워져 있어야 1초 전 frame 을 정확히 줄 수 있음.
+        self._cam_poll_thread = threading.Thread(target=self._camera_poll_loop, daemon=True, name="DEPLOY_CAMPOLL")
         self._slow_thread.start()
         self._fast_thread.start()
+        self._cam_poll_thread.start()
         logger_mp.info(
             f"[Deploy] Gr00t_Inference started (mode={mode}, hand={self.hand_type}, "
             f"camera_roles={self.camera_roles}, action_method={action_method}, "
-            f"slow={slow_hz}Hz, fast={fast_hz}Hz, obs_ts_policy={obs_ts_policy})"
+            f"slow={slow_hz}Hz, fast={fast_hz}Hz, obs_ts_policy={obs_ts_policy}, "
+            f"video_history_offset={self._video_history_offset_ns/1e9:.2f}s, "
+            f"ring_capacity=120 per camera)"
         )
 
     # ----- init helpers ------------------------------------------------------
@@ -435,48 +536,63 @@ class Gr00t_Inference:
         except Exception:
             pass
 
-        # 카메라 frame + ts read. Phase L2: ts 후보에 카메라 ts 도 포함.
+        # Phase B: 카메라 frame 들을 ring buffer 에서 가져와 (과거, 현재) 두 frame stack.
+        # 학습 video.delta_indices=[-20, 0] 와 동일 순서 [과거, 현재] 로 build.
+        # ring 은 별도 60Hz polling thread (_camera_poll_loop) 가 채움.
+        # ts 후보 (obs_ts_policy 용): body/hand + 각 카메라의 현재 frame ts.
         ts_candidates = [t for t in (ts_body, ts_hand) if t > 0]
+        now_ns = time.perf_counter_ns()
+        target_past_ns = now_ns - self._video_history_offset_ns  # 1.0초 전
 
-        frames: Dict[str, np.ndarray] = {}
-        if self.zed_mode:
-            if self.legacy_camera_shm is None:
+        frames: Dict[str, List[np.ndarray]] = {}
+        # masking workspace mask (zed_mode 만 사용). 학습 시엔 mask 적용 X 가 일반적
+        # 이지만 기존 동작 보존 위해 zed_mode 의 양 frame 에 동일 mask 적용.
+        ws_mask = None
+        if self.zed_mode and self.masking and self.workspace_mask_shm is not None:
+            try:
+                ws_mask = self.workspace_mask_shm.read_data()
+            except Exception:
+                ws_mask = None
+
+        def _apply_ws_mask(role: str, frame: np.ndarray) -> np.ndarray:
+            """zed_mode masking: left/right 별 mask 곱셈. 다른 모드는 frame 그대로."""
+            if ws_mask is None or not self.zed_mode:
+                return frame
+            key = "mask_left_flat" if role == 'ego_left' else "mask_right_flat"
+            if key not in ws_mask:
+                return frame
+            m = ws_mask[key].reshape(frame.shape[:2])
+            if m.dtype != np.uint8:
+                return (frame * m[..., None].astype(np.uint8)).astype(np.uint8)
+            return frame
+
+        for role in self.camera_roles:
+            ring = self._cam_rings.get(role)
+            if ring is None or len(ring) == 0:
+                # ring 비어 있음 (시작 직후 첫 polling 전). slow tick skip.
                 return None
-            d = self.legacy_camera_shm.read_data()
-            cam_ts = int(d.get('frame_ts', 0))
-            if cam_ts > 0:
-                ts_candidates.append(cam_ts)
-            left = process_frame(d['frame_left'], side='zed_left')
-            right = process_frame(d['frame_right'], side='zed_right') if self.binocular else None
-            if left is None:
+            latest = ring.latest()
+            if latest is None:
                 return None
-            if self.masking and self.workspace_mask_shm is not None:
-                m = self.workspace_mask_shm.read_data()
-                ml = m["mask_left_flat"].reshape(left.shape[:2])
-                if ml.dtype != np.uint8:
-                    left = (left * ml[..., None].astype(np.uint8)).astype(np.uint8)
-                if right is not None:
-                    mr = m["mask_right_flat"].reshape(right.shape[:2])
-                    if mr.dtype != np.uint8:
-                        right = (right * mr[..., None].astype(np.uint8)).astype(np.uint8)
-            frames['ego_left'] = left
-            if right is not None:
-                frames['ego_right'] = right
-        else:
-            # RealSense 멀티뷰 (Phase L1).
-            if not self.camera_shms:
-                return None
-            for role, shm in self.camera_shms.items():
-                d = shm.read_data()
-                cam_ts = int(d.get('frame_ts', 0))
-                if cam_ts > 0:
-                    ts_candidates.append(cam_ts)
-                rgb = process_frame(d['frame_left'], side=f'rs_{role}')
-                if rgb is None:
-                    continue
-                frames[role] = rgb
-            if not frames:
-                return None
+            cur_ts, cur_frame = latest
+            ts_candidates.append(cur_ts)
+
+            # 1초 전 frame pick. ring 에 1초 분량 안 차 있으면 (warmup) 현재 frame 복제.
+            # 학습 시 step_index<20 의 allow_padding clamp([-20,0]→[0,0]=동일 frame)
+            # 거동과 정확히 일치 → 학습-배포 정합.
+            past = ring.pick_at(target_past_ns, tol_ns=self._video_history_tol_ns)
+            if past is None:
+                past_frame = cur_frame  # warmup: 현재 복제
+            else:
+                _, past_frame = past
+
+            past_frame = _apply_ws_mask(role, past_frame)
+            cur_frame  = _apply_ws_mask(role, cur_frame)
+            # 순서 [과거, 현재] = video.delta_indices=[-20, 0] 와 일치.
+            frames[role] = [past_frame, cur_frame]
+
+        if not frames:
+            return None
         # Phase M4 (PART3 §2.5): 동적 obs dict (layout 기반). N1.7: 중첩 dict + language_key.
         obs = build_obs_dict(self.task_name, qpos, hand_qpos, frames,
                              self.hand_type, self.layout, self.language_key)
@@ -649,6 +765,54 @@ class Gr00t_Inference:
         self.write_shm(a, h)
 
     # ----- loops -------------------------------------------------------------
+    def _camera_poll_loop(self):
+        """Phase B: 60Hz 로 모든 카메라 SHM 을 polling 해 frame ring buffer 를 채운다.
+
+        polling 주기 = 카메라 publish 주기와 일치 (1/60s). dedup 은 ring 의
+        push() 가 last_ts 기반으로 처리하므로 동일 frame 반복 read 해도 ring 에
+        중복 안 들어감. inference thread 가 ring 의 1초 전 frame 을 ts 기반 pick.
+
+        zed_mode: legacy_camera_shm 에서 stereo left/right 별도로 ring 에 push
+                  (camera_roles = ['ego_left', 'ego_right']).
+        멀티뷰:    self.camera_shms 의 각 SHM 에서 frame_left 만 push
+                  (camera_roles = ['ego', 'wrist_l', 'wrist_r']).
+        """
+        period = 1.0 / 60.0
+        next_t = time.perf_counter()
+        while not self._stop_event.is_set() and not self.shared_event["shutdown"].is_set():
+            try:
+                if self.zed_mode:
+                    if self.legacy_camera_shm is not None:
+                        d = self.legacy_camera_shm.read_data()
+                        ts = int(d.get('frame_ts', 0))
+                        if ts > 0:
+                            left = process_frame(d['frame_left'], side='zed_left')
+                            if left is not None and 'ego_left' in self._cam_rings:
+                                self._cam_rings['ego_left'].push(ts, left)
+                            if self.binocular:
+                                right = process_frame(d['frame_right'], side='zed_right')
+                                if right is not None and 'ego_right' in self._cam_rings:
+                                    self._cam_rings['ego_right'].push(ts, right)
+                else:
+                    for role, shm in self.camera_shms.items():
+                        d = shm.read_data()
+                        ts = int(d.get('frame_ts', 0))
+                        if ts <= 0:
+                            continue
+                        rgb = process_frame(d['frame_left'], side=f'rs_{role}')
+                        if rgb is None:
+                            continue
+                        if role in self._cam_rings:
+                            self._cam_rings[role].push(ts, rgb)
+            except Exception as e:
+                logger_mp.warning(f"[Deploy] camera poll loop error: {e}")
+            next_t += period
+            sleep = next_t - time.perf_counter()
+            if sleep > 0:
+                time.sleep(sleep)
+            else:
+                next_t = time.perf_counter()
+
     def _inference_loop(self):
         period = 1.0 / self.slow_hz
         next_t = time.perf_counter()
@@ -699,6 +863,7 @@ class Gr00t_Inference:
         self._stop_event.set()
         self._slow_thread.join(timeout=2.0)
         self._fast_thread.join(timeout=2.0)
+        self._cam_poll_thread.join(timeout=2.0)
         self._cleanup()
 
     def _cleanup(self):

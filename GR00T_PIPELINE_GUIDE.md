@@ -1,9 +1,19 @@
 # G1_Teleop_Datacollection → GR00T N1.7 학습 파이프라인 (전체 절차)
 
 > 본 문서는 실제 GR00T N1.7 코드(lerobot_episode_loader / sharded_single_step_dataset /
-> factory / stats / launch_finetune / embodiment_configs)와 G1_Teleop_Datacollection
-> 수집 코드(worker_record / parquet_sink / build_dataset_meta)를 정독해 확정한 절차입니다.
-> pick_test 1개 에피소드로 변환→stats→로딩까지 실데이터 end-to-end 검증 완료.
+> factory / stats / launch_finetune / embodiment_configs) + HuggingFace base 모델
+> (`nvidia/GR00T-N1.7-3B`) 의 processor_config.json 직접 정독 + G1_Teleop_Datacollection
+> 수집 코드(worker_record / parquet_sink / build_dataset_meta) 를 모두 확인해 확정한 절차입니다.
+>
+> **현재 상태 (Phase A~D 적용 후)**:
+> - `examples/G1_DEX3/g1_dex3_config.py`: `video.delta_indices=[-20, 0]` (base 학습 일치),
+>   `ACTION_HORIZON=40` (base capacity 일치).
+> - `gr00t/configs/finetune_config.py` + `examples/finetune.sh`: `--allow-padding` 옵션 노출
+>   (음수 video delta 안전 처리 — Phase A).
+> - `workers/worker_deploy_policy.py`: video 2-frame ring buffer + 60Hz polling thread 추가
+>   (학습-배포 정합 — Phase B).
+> - 학습 가이드: `~/Isaac-GR00T/G1_TRAINING_GUIDE.md` (Phase D, 외부 서버용).
+> - pick_test / multitask_test 실데이터로 데이터 파이프라인 end-to-end 검증 완료.
 
 ---
 
@@ -56,10 +66,43 @@ record/<task_name>/
 - modality.json 은 수집 시 utils/modality_layout.py 가 자동 생성 (state/action 28D 분할,
   video original_key, annotation original_key=task_index). GR00T 형식과 일치 — 수정 불필요.
 
-### 1-4. 학습용 데이터 수집 가이드 (권장)
-- **에피소드 수**: 검증은 1개로 충분하나, 실제 학습은 최소 50개 이상 권장 (GR00T 가이드).
-- **hand 동작 다양성**: pick_test 분석 시 엄지 일부 관절이 상수(미사용)였음. 다양한 grip 포함 권장.
-  (상수 dim 은 GR00T 가 1e-8 클램프로 안전 처리하므로 학습은 가능하나, 다양성이 일반화에 유리.)
+### 1-4. 학습용 데이터 수집 가이드 (권장, Phase A 변경 반영)
+
+#### 최소 episode 길이 (★ 중요 — 새 config 기반)
+
+학습 시 `g1_dex3_config.py` 가 `video.delta_indices=[-20, 0]` (1초 history) + `ACTION_HORIZON=40`
+(2초 lookahead) 을 요구하므로, 다음 두 제약을 동시 만족해야 sample 학습 가치가 있음:
+- effective_length = `original − ACTION_HORIZON + 1 = original − 39`
+- 정상 video pair 가 잡히는 sample = `effective_length − |min video delta| = effective_length − 20`
+
+원본 frame (= 변환 후 20fps parquet 행 수) 별 학습 가용 sample:
+
+| 원본 length (frame) | duration | effective_length | 정상 video pair sample | clamp 비율 | 추천도 |
+|---|---|---|---|---|---|
+| 40  | 2.0s  | 1   | 0   | 100% | ❌ 학습 불가 |
+| 60  | 3.0s  | 21  | 1   | 95.2% | ⚠️ 매우 부족 |
+| 100 | 5.0s  | 61  | 41  | 32.8% | △ 단기 task |
+| 200 | 10.0s | 161 | 141 | 12.4% | ✓ 권장 |
+| 400 | 20.0s | 361 | 341 | 5.5%  | ✓✓ 권장 |
+| 600 | 30.0s | 561 | 541 | 3.6%  | ✓✓ 권장 |
+
+→ **에피소드당 최소 10초 (200 frame @20fps 변환) 이상 권장**.
+→ 5초 이하의 짧은 task 는 학습 sample 부족. (allow_padding 으로 학습은 가능하나 처음 1초 video clamp 비율 ↑)
+
+#### 에피소드 수 권장 (NVIDIA 공식 + 우리 계산)
+
+| 에피소드 수 | 평균 episode | 전체 effective sample | 추천 task 난이도 |
+|---|---|---|---|
+| 10 ep  | 10초 (200 frame) | ~1,600   | smoke test 만 |
+| 50 ep  | 10초 (200 frame) | ~8,000   | NVIDIA 가이드 최소 |
+| 100 ep | 10초 (200 frame) | ~16,000  | 단일 task 권장 |
+| 50 ep × N task | 10초 | ~8,000×N | 다중 task |
+
+#### 데이터 다양성
+
+- **DEX3 controller-mode 의 hand action**: thumb_0/thumb_1 dim 은 CLI 상수, thumb_2/index/middle 는 이산 toggle (open=0 / closed=±한계). state-action corr 0.73~0.82 검증됨 → 학습 가능. 단 **grasp/release timing 다양성** 이 중요 (한 task 당 grasp 1회만 있으면 모델이 timing 학습 불가).
+- **arm 자세 다양성**: 같은 target 위치라도 접근 경로/속도 다양화 권장.
+- **state-action 정합성**: 우리 데이터는 controller toggle → motor 추적 → state 의 자연스러운 인과관계. 학습에 적합.
 
 ---
 
@@ -112,55 +155,55 @@ python -m gr00t.data.stats \
 python verify_gr00t_loading.py \
     --dataset-path $HOME/G1_Teleop_Datacollection/record_gr00t/<task_name> \
     --modality-config-path examples/G1_DEX3/g1_dex3_config.py \
-    --num-samples 3
+    --num-samples 3 \
+    --allow-padding             # ★ Phase A: video.delta_indices=[-20, 0] 시 필수
 ```
-→ config 등록 / 데이터셋 인스턴스화 / state(1×7×4) / action(16×7×4) /
-  비디오 디코딩(360×640×3 uint8) / 영상-상태 정합(GR00T assert) / text 확인.
+→ config 등록 / 데이터셋 인스턴스화 / state(1×7×4) / action(**40**×7×4) /
+  비디오 디코딩(**2프레임** 360×640×3 uint8, [과거, 현재] 순서) / 영상-상태 정합(GR00T assert) / text 확인.
 - 비디오 디코딩 에러 시: `--video-backend torchvision_av` 로 재시도.
+- `--allow-padding` 미설정 시: pandas iloc 의 negative wrap-around 로 step_index<20 의 sample 이 잘못된 frame pair 로 로드됨 (silent data corruption). **반드시 함께 사용**.
 
 ---
 
 ## 4. 학습 머신(서버)로 이전 + 학습
 
-### 4-1. 이전 항목
-| 항목 | 방법 |
-|---|---|
-| GR00T 코드 | `~/Isaac-GR00T` 전체 복사 (examples/G1_DEX3/g1_dex3_config.py 포함) |
-| 변환 데이터 | `record_gr00t/<task_name>` 복사 (parquet+비디오+meta, 비디오 용량 주의) |
-| conda 환경 | **재구축** (복사 X) — 서버 GPU/CUDA 에 맞게 |
-| 모델 가중치 | nvidia/GR00T-N1.7-3B (~6GB) — 학습 시 HF 자동 다운로드 or 미리 받기 |
+> ★ **상세 절차 별도 문서**: `~/Isaac-GR00T/G1_TRAINING_GUIDE.md` (Phase D, 외부 서버 설치/학습/검증 전체 절차). 본 섹션은 요약만.
 
-### 4-2. 서버 환경 재구축
+### 4-1. 이전 항목 + 명령
+- Isaac-GR00T 전체 코드 (`examples/G1_DEX3/g1_dex3_config.py` 포함, Phase A~D 변경 모두 포함)
+- 변환 데이터 `record_gr00t/<task_name>` (parquet + 비디오 + meta)
+- 환경은 외부 서버에서 재구축 (Ubuntu 22.04 + CUDA 12.8+ + dgpu install_deps.sh 권장)
+- base 모델은 HF auto-download (anonymous OK, public repo)
+
+### 4-2. 서버 환경 세팅 (공식 dgpu install — 권장)
 ```bash
-# 서버에서
+# 외부 서버에서
 cd ~/Isaac-GR00T
-conda create -n groot python=3.10
-conda activate groot
-pip install -e .[base]
-pip install --no-build-isolation flash-attn   # GPU 아키텍처별 컴파일
-# torch 는 서버 CUDA 버전에 맞는 버전 설치 (예: cu121/cu124 등)
+bash scripts/deployment/dgpu/install_deps.sh   # ffmpeg/libaio/cuda-toolkit + uv + 패키지 자동
+source .venv/bin/activate
 ```
 
-### 4-3. 학습 (A6000/RTX6000 ×10 — VRAM 48GB 충분)
+### 4-3. 학습 (공식 finetune.sh wrapper — 권장 표준 경로)
 ```bash
 cd ~/Isaac-GR00T
-conda activate groot
-# 단일 GPU 예시 (멀티는 --num-gpus 조정)
-CUDA_VISIBLE_DEVICES=0 python gr00t/experiment/launch_finetune.py \
+source .venv/bin/activate
+
+# 적은 데이터 (≤100 ep) 예시
+EPISODE_SAMPLING_RATE=1.0 \
+NUM_GPUS=1 \
+MAX_STEPS=10000 \
+bash examples/finetune.sh \
     --base-model-path nvidia/GR00T-N1.7-3B \
-    --dataset-path $HOME/record_gr00t/<task_name> \
+    --dataset-path ~/G1_Teleop_Datacollection/record_gr00t/<task_name> \
     --embodiment-tag NEW_EMBODIMENT \
     --modality-config-path examples/G1_DEX3/g1_dex3_config.py \
-    --num-gpus 1 \
-    --output-dir ./outputs/g1_<task_name> \
-    --max-steps 10000 --global-batch-size 32 \
-    --dataloader-num-workers 4 \
-    --episode-sampling-rate 1.0     # 에피소드 적을 때. 많으면 기본 0.1 검토
+    --output-dir ~/outputs/g1_<task_name>_$(date +%Y%m%d_%H%M) \
+    --allow-padding     # ★ Phase A: 음수 video delta 안전 처리 (필수)
 ```
-- A6000(48GB)/RTX6000 Ada(48GB): 3B full finetune(40GB 권장) 단일 GPU 가능.
-  10 GPU 면 --num-gpus 로 분산학습.
-- `--episode-sampling-rate`: 기본 0.1(에피소드 10%만 샘플). 에피소드 적으면 1.0.
-- 멀티 GPU: README 의 `uv run torchrun` 또는 launch_finetune --num-gpus N.
+- `--allow-padding` 필수 (또는 `ALLOW_PADDING=1` env). 미설정 시 silent data corruption.
+- 단일 GPU 권장: A6000/A100/H100 48GB+. 16~24GB 는 `GLOBAL_BATCH_SIZE` ↓ + `gradient_accumulation_steps` ↑ 필요.
+- 멀티 GPU: `NUM_GPUS=N` 환경변수 — finetune.sh 가 자동으로 torchrun 사용.
+- 자세한 파라미터/트러블슈팅: `~/Isaac-GR00T/G1_TRAINING_GUIDE.md` §5-6 참조.
 
 ---
 
@@ -176,11 +219,49 @@ python data_refinement/verify_dp_dataset.py --zarr record/<task_name>_dp.zarr --
 
 ---
 
-## 검증 완료 상태 (pick_test 실데이터 기준)
-- [x] 변환 (60→20fps, 메타 4종, float64 유지)
-- [x] config 등록 (NEW_EMBODIMENT, arm RELATIVE / hand ABSOLUTE)
-- [x] stats.json (28D) + relative_stats.json (16×7, arm 만)
-- [x] 데이터 로딩 (state/action 차원, 비디오 디코딩, 영상-상태 정합, text)
-- [ ] 실제 학습 (학습 서버에서, 다수 에피소드 수집 후)
+## 6. 배포 (학습 후, 실로봇)
+
+### 6-1. 배포 코드 변경 사항 (Phase B 완료)
+- `workers/worker_deploy_policy.py`:
+  - `_CameraFrameRing` 클래스 추가 (per-camera, 120 슬롯, ts 기반).
+  - 별도 60Hz `_camera_poll_loop` thread 가 카메라 SHM 을 polling 해 ring 채움.
+  - `get_real_obs` 가 ring 에서 현재 frame + 1초 전 frame 두 개를 ts 기반 pick.
+  - Warmup (시작 후 1초 동안 ring 미충전 시): 현재 frame 복제 → 학습 시 step_index<20 의 allow_padding clamp 와 정확히 일치 거동.
+  - `build_obs_dict` 가 video=(B=1, T=2, H, W, C) uint8 로 stack ([과거, 현재] 순서).
+- `evaluate.py`: 변경 없음 (worker_deploy_policy 가 자동 처리).
+
+### 6-2. 배포 명령
+```bash
+# Terminal 1: main.py (teleop env, SHM owner)
+cd ~/G1_Teleop_Datacollection
+conda activate teleop
+python main.py --hand dex3 --camera realsense --vr-input controller \
+    --waist fixed --head off --lower-body hoist
+
+# Terminal 2: GR00T 정책 추론 (groot env, SHM attach)
+conda activate groot
+python evaluate.py \
+    --mode gr00t_rs_multi \
+    --model-path ~/checkpoints/g1_<task_name>/ \
+    --embodiment-tag new_embodiment \
+    --device cuda \
+    --modality-json ~/G1_Teleop_Datacollection/record_gr00t/<task_name>/meta/modality.json
+```
+
+→ UI 에서 Deploy=True 버튼 누르면 정책 추론 시작.
+
+---
+
+## 검증 완료 상태 (pick_test / multitask_test 실데이터 기준, Phase A~D 적용 후)
+- [x] 데이터 수집 (G1+DEX3+RealSense 3대, 60Hz, 변경 없음)
+- [x] 변환 (60→20fps, 메타 4종)
+- [x] embodiment config 등록 (NEW_EMBODIMENT, video=[-20,0], action horizon=40, arm RELATIVE / hand ABSOLUTE)
+- [x] stats.json (28D) + relative_stats.json (16×7 — 음수 video delta 와 무관, arm 만)
+- [x] 데이터 로딩 (state(1,7)×4 / action(40,7)×4 / video(2,360,640,3) / text) — `--allow-padding` 통과
+- [x] `--allow-padding` CLI 노출 (FinetuneConfig + launch_finetune + finetune.sh)
+- [x] Deploy ring buffer + 60Hz polling thread + warmup (Phase B)
+- [x] action_horizon=40 deploy upsample/cross-fade/lag 호환성 (Phase C, 코드 변경 0)
+- [x] 학습 가이드 (`G1_TRAINING_GUIDE.md`)
+- [ ] **실제 학습 (외부 서버에서, 권장 ≥50 ep × 평균 ≥10s 수집 후)**
+- [ ] **실로봇 정책 배포 검증 (학습 체크포인트로 evaluate.py 실행)**
 - [ ] DP 변환 실데이터 검증 (DP 쓸 경우)
-- [ ] 배포 경로 (worker_deploy_policy.py N1.7 import 경로 수정 — 학습 후)
