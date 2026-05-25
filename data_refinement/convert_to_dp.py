@@ -50,7 +50,21 @@ except ImportError as e:
     raise
 
 
-DEFAULT_VIEWS = ["ego_left_view", "ego_right_view", "ego_realsense"]
+DEFAULT_VIEWS = ["ego", "wrist_l", "wrist_r"]
+
+
+def _downsample_indices(n_frames: int, src_fps: float, tgt_fps: float) -> np.ndarray:
+    """정수배 다운샘플 인덱스. 60→10=6:1 처럼 정수배면 step 샘플링(값 보존).
+    정수배가 아니면 균일 간격 근사."""
+    src_fps, tgt_fps = float(src_fps), float(tgt_fps)
+    if tgt_fps >= src_fps:
+        return np.arange(n_frames)  # 다운샘플 불필요
+    ratio = src_fps / tgt_fps
+    if abs(ratio - round(ratio)) < 1e-6:
+        step = int(round(ratio))
+        return np.arange(0, n_frames, step)
+    n_out = int(round(n_frames * tgt_fps / src_fps))
+    return np.linspace(0, n_frames - 1, n_out).round().astype(int)
 
 
 def _list_episodes(src: str) -> List[int]:
@@ -116,6 +130,10 @@ def main():
                     help="Parquet column for action (default: action)")
     ap.add_argument("--include-sensor", action="store_true",
                     help="Also store observation.sensor under data/sensor (if present).")
+    ap.add_argument("--src-fps", type=float, default=60.0,
+                    help="Source data fps (default: 60).")
+    ap.add_argument("--tgt-fps", type=float, default=10.0,
+                    help="Target fps for Diffusion Policy (default: 10). 60->10 = 6:1.")
     args = ap.parse_args()
 
     ep_indices = _list_episodes(args.src)
@@ -182,20 +200,25 @@ def main():
     for k, ep in enumerate(ep_indices):
         pq, vids = _episode_paths(args.src, ep, args.views)
         df = pd.read_parquet(pq, engine="pyarrow")
-        T = len(df)
-        if T == 0:
+        T_full = len(df)
+        if T_full == 0:
             print(f"  [skip empty] episode {ep}")
             continue
 
-        state  = _stack_list_col(df, args.state_key)
-        action = _stack_list_col(df, args.action_key)
-        ts     = df["timestamp"].to_numpy(dtype=np.float64)
+        # 60->tgt fps 다운샘플 인덱스 (state/action/ts/video 공통 적용 → 정합 보장).
+        keep = _downsample_indices(T_full, args.src_fps, args.tgt_fps)
+        T = len(keep)
+
+        state  = _stack_list_col(df, args.state_key)[keep]
+        action = _stack_list_col(df, args.action_key)[keep]
+        # timestamp 는 tgt_fps 기준으로 재계산 (다운샘플 후 0,1/tgt,2/tgt,...).
+        ts     = (np.arange(T) / float(args.tgt_fps)).astype(np.float64)
 
         state_arr.append(state)
         action_arr.append(action)
         ts_arr.append(ts)
         if sensor_arr is not None and "observation.sensor" in df.columns:
-            sensor_arr.append(_stack_list_col(df, "observation.sensor"))
+            sensor_arr.append(_stack_list_col(df, "observation.sensor")[keep])
 
         for v, arr in cam_arrs.items():
             if not os.path.exists(vids[v]):
@@ -203,12 +226,13 @@ def main():
                 H, W = cam_shapes[v]
                 arr.append(np.zeros((T, H, W, 3), dtype=np.uint8))
             else:
-                vid = _read_video(vids[v], expected_frames=T)
-                arr.append(vid)
+                # 전체 디코드 후 동일 keep 인덱스로 다운샘플 (state 와 정합).
+                vid = _read_video(vids[v], expected_frames=T_full)
+                arr.append(vid[keep])
 
         cumulative += T
         episode_ends.append(cumulative)
-        print(f"  [{k+1}/{len(ep_indices)}] ep {ep:06d} T={T} -> cum={cumulative}")
+        print(f"  [{k+1}/{len(ep_indices)}] ep {ep:06d} T={T_full}->{T} (x{args.src_fps:.0f}->{args.tgt_fps:.0f}fps) cum={cumulative}")
 
     meta_grp.create_dataset("episode_ends", data=np.asarray(episode_ends, dtype=np.int64),
                             compressor=None, overwrite=True)

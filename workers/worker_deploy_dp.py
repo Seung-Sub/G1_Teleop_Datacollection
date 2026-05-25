@@ -1,24 +1,22 @@
-"""worker_deploy_policy: external policy (GR00T) inference adapter for G1.
+"""worker_deploy_dp: external policy (Diffusion Policy) inference adapter for G1.
 
-Phase L (Part 2 P0-1 + P0-2 + P1-3) 재작성:
-  - hand 종류 (Inspire 6+6 / DEX3 7+7) 를 teleop_config_shm 의 hand_type 으로 자동
-    분기. obs_dict / action_to_array 가 hand DOF 에 맞게 동작.
-  - 카메라 입력 = role 별 CAMERA_VIEW SHM (rs_ego_shm / rs_wrist_l_shm /
-    rs_wrist_r_shm) attach. modality.json 의 video.{ego,wrist_l,wrist_r}.original_key
-    = "observation.images.<role>" 와 정합되도록 obs dict 의 video 키도
-    "video.ego", "video.wrist_l", "video.wrist_r" 사용. ZED 는 mode='gr00t_zed'
-    유지 (single CAMERA SHM, legacy).
-  - obs_ts_ns 는 모든 활성 모달리티 (body / hand / 카메라들) 중 가장 stale (min)
-    또는 가장 최근 (max) 을 선택 — --obs-ts-policy 로 조정. default 는 min
-    (가장 stale 한 모달리티가 obs 유효시각 결정 — Part2 §2.1 권고).
-  - action_body_ts / action_hand_ts 분리. publish 시각만 다른 게 아니라 향후
-    body/hand publish 경로가 분리될 때 영향 없도록.
-  - hand upsample 은 spline → linear (k=1). DEX3 grasp 같은 이산/포화 신호의
-    ringing 방지. arm/waist 는 spline 유지.
+GR00T 용 worker_deploy_policy 의 검증된 골격(SHM 입출력, DualRate loop, upsample,
+action_method, cross-fade, lag compensation, write_shm)을 재사용하되, 모델/obs
+부분만 Diffusion Policy(real-stanford/diffusion_policy) 용으로 교체.
 
-main.py 의 teleop env 에서는 gr00t 가 없어도 import 안전 (lazy import) — main.py
-가 spawn 하지 않는 worker 라서 worker file 자체 import 만 OK 면 됨. 실 추론은
-별도 conda env (gr00t) 의 evaluate.py 가 SHM 에 attach 해 실행.
+GR00T 대비 DP 차이 (실제 DP 코드 정독 확정):
+  - 모델: torch.load(ckpt, dill) → workspace → ema_model (Gr00tPolicy 대신).
+  - obs: 평탄 dict {camera_0/1/2: (B,To,C,H,W) float32 [0,1], state: (B,To,28) float32}.
+    이미지 (H,W,C) uint8 → (C,H,W) float32 /255. (GR00T 는 (H,W,C) uint8 중첩 dict.)
+  - n_obs_steps=2 → 과거 2 스텝 obs 누적 필요 (deque 히스토리). GR00T 는 To=1.
+  - language 없음 (DP 단일 task). GR00T 는 language_key 필요.
+  - 추론: policy.predict_action(obs_dict)["action"] → (1, n_action_steps, 28).
+  - slow_hz=10 (DP 학습 60→10 다운샘플). GR00T 는 20. fast_hz=60 동일 (arm 제어).
+  - action 28D = left_arm7+right_arm7+left_hand7+right_hand7 (waist/head 없음).
+
+카메라 role / state 레이아웃 / robot_action_shm 출력은 GR00T 와 동일 (하드웨어 동일).
+main.py teleop env 에서 torch 없어도 import 안전 (lazy import). 실 추론은 별도
+conda env (umi/dp) 의 evaluate_dp.py 가 SHM 에 attach 해 실행.
 """
 from __future__ import annotations
 
@@ -63,16 +61,13 @@ def process_frame(frame: np.ndarray, side: str = "") -> Optional[np.ndarray]:
     return rgb.astype(np.uint8)
 
 
-def upsample_actions(seq: np.ndarray, slow_hz: float = 20.0, fast_hz: float = 60.0,
+def upsample_actions(seq: np.ndarray, slow_hz: float = 10.0, fast_hz: float = 60.0,
                      k: int = 5) -> np.ndarray:
     """Spline-upsample a (T, D) action chunk from slow_hz to fast_hz.
 
-    slow_hz=20: GR00T action chunk 의 각 step 은 학습 데이터(60→20 다운샘플) 타임스텝.
-    fast_hz=60: 실제 arm 제어 루프 주파수 (worker_g1_ctrl ACT_HZ=60, 수집 체인과 일치).
-                deploy fast loop 가 60Hz 로 robot_action_shm 에 write → g1_ctrl 이 60Hz read.
-
-    Phase L3 (P1-3): hand 처럼 이산/포화 신호는 k=1 (linear) 로 호출해 ringing 방지.
-    arm/waist 같은 연속 신호는 k=5 (quintic) 유지.
+    DP: slow_hz=10 (학습 데이터 60→10 다운샘플 타임스텝), fast_hz=60 (arm 제어 루프).
+        실제로는 인스턴스의 self.slow_hz/self.fast_hz 사용 — 기본값은 참고용.
+    hand 처럼 이산/포화 신호는 k=1 (linear), arm 연속 신호는 k=5 (quintic).
     """
     from scipy.interpolate import make_interp_spline
     T, D = seq.shape
@@ -110,56 +105,52 @@ def _parts_from_obs(qpos: np.ndarray, hand_qpos: np.ndarray, hand_type: str) -> 
     }
 
 
-def build_obs_dict(task_name: str, qpos: np.ndarray, hand_qpos: np.ndarray,
-                   frames: Dict[str, np.ndarray], hand_type: str,
-                   layout, language_key: str) -> dict:
-    """N1.7 Gr00tPolicy 용 *중첩* obs dict (공식 권고 — custom robot 은 Gr00tPolicy 직접 사용).
+def build_obs_frame(qpos: np.ndarray, hand_qpos: np.ndarray,
+                    frames: Dict[str, np.ndarray], hand_type: str,
+                    camera_key_map: Dict[str, str]) -> dict:
+    """DP 용 *단일 프레임* obs 추출 (히스토리 누적은 호출측에서).
 
-    N1.7 Gr00tPolicy.get_action 입력 형식 (gr00t_policy.py L246-342):
-        obs = {
-          "video":    { role: (B,T,H,W,C) uint8 },     # T == video delta_indices 길이(=1)
-          "state":    { name: (B,T,D) float32 },        # T == state delta_indices 길이(=1)
-          "language": { language_key: list[list[str]] } # (B, 1)
+    DP policy.predict_action 입력 (base_image_policy.py): {key: (B,To,*)}.
+    여기서는 1 프레임만 만들고, get_real_obs 가 deque 로 To 개 쌓아 (1,To,*) 구성.
+
+    반환 (단일 프레임, batch/time 차원 없음):
+        {
+          "state":    (28,) float32,                 # left_arm7+right_arm7+left_hand7+right_hand7
+          "camera_0": (C,H,W) float32 [0,1],          # ego
+          "camera_1": (C,H,W) float32 [0,1],          # wrist_l
+          "camera_2": (C,H,W) float32 [0,1],          # wrist_r
         }
-    여기서 B=1, T=1. video uint8 / state float32 보장.
+    DP 학습 dataset(__getitem__)과 동일: 이미지 (H,W,C)uint8 → (C,H,W)float32 /255.
+    state 28D 순서 = convert_to_dp 의 state 레이아웃과 정합.
 
-    layout: build_state_layout(...) 또는 layout_from_modality_json(...) 결과.
-            modality.json 의 state 키만 포함 — 학습 데이터셋 layout 과 정합 (차원 자동).
-    language_key: policy.language_key (체크포인트서 자동 = 'annotation.human.task_description').
-                  하드코딩하지 않고 policy 가 알려주는 키를 써서 학습-추론 정합 보장.
-    frames: {role: rgb_np uint8}. RealSense 'ego'/'wrist_l'/'wrist_r' 또는 ZED 'ego_left' 등.
+    camera_key_map: {role: "camera_N"} (예 {"ego":"camera_0","wrist_l":"camera_1",...}).
+                    shape_meta(g1_dex3_image.yaml)의 obs 키와 일치해야 함.
     """
     parts = _parts_from_obs(qpos, hand_qpos, hand_type)
-    obs: dict = {"video": {}, "state": {}, "language": {}}
-    for name, _dim in layout:
-        # (B=1, T=1, D) float32
-        obs["state"][name] = parts[name][None, None, :].astype(np.float32)
+    # DP state 28D = arm+hand (waist/head 제외 — DP 학습 데이터 28D 구성).
+    state = np.concatenate([
+        parts["left_arm"], parts["right_arm"],
+        parts["left_hand"], parts["right_hand"],
+    ], axis=0).astype(np.float32)   # (28,)
+
+    out: dict = {"state": state}
     for role, rgb in frames.items():
-        # (B=1, T=1, H, W, C) uint8
-        obs["video"][role] = rgb[None, None, ...].astype(np.uint8)
-    # language: (B=1, T=1) = list[list[str]]
-    obs["language"][language_key] = [[task_name]]
-    return obs
+        cam_key = camera_key_map.get(role)
+        if cam_key is None:
+            continue
+        # (H,W,C) uint8 → (C,H,W) float32 [0,1] (학습 dataset 과 동일)
+        chw = np.moveaxis(rgb, -1, 0).astype(np.float32) / 255.0
+        out[cam_key] = chw
+    return out
 
 
 def action_to_array(action: dict, i: int, hand_type: str, layout) -> tuple:
-    """Pull one timestep out of a N1.7 GR00T action chunk.
-
-    N1.7 Gr00tPolicy.get_action 출력 (gr00t_policy.py L444, check_action):
-        action[<modality_key>] = np.ndarray (B, T, D) float32
-        키는 modality_keys 그대로 — 접두사 없음 (left_arm, right_arm, left_hand, right_hand).
-        (PolicyWrapper 만 'action.' 접두사를 붙임. 여기선 Gr00tPolicy 직접 사용.)
-
-    layout 에 waist/head 가 있으면 그 키도 시도하나, g1_dex3_config 의 action modality_keys
-    는 left_arm/right_arm/left_hand/right_hand 4개뿐 → waist/head 는 자동 zero.
-
-    Returns (action_np[19] full body, hand_action_np[12 or 14]) for write_shm.
-    write_shm 은 fixed-shape (waist[3],head[2],arm[14],hand[14]) 이므로 없는 모달리티는 zero.
+    """[GR00T 잔재 — DP 에서는 미사용] N1.7 GR00T action chunk 분해용.
+    DP 는 action_chunk_to_array (아래) 를 사용. import 호환 위해 정의만 유지.
     """
     layout_names = {n for n, _ in layout}
 
     def _opt(key: str, dim: int) -> np.ndarray:
-        # N1.7: 접두사 없는 키. action[key] shape (B=1, T, D) → [0, i] = (D,)
         if key in action:
             return np.asarray(action[key][0, i], dtype=np.float32)
         return np.zeros(dim, dtype=np.float32)
@@ -177,42 +168,91 @@ def action_to_array(action: dict, i: int, hand_type: str, layout) -> tuple:
     return action_np, hand_action
 
 
-# =============================================================================
-# Lazy GR00T policy loader
-# =============================================================================
+def dp_action_chunk_to_arrays(action_chunk: np.ndarray, hand_type: str) -> tuple:
+    """DP predict_action 출력 (n_action_steps, 28) → (full[T,19], hand[T,14|12]).
 
-def init_gr00t_policy(model_path: str,
-                      embodiment_tag: str = "new_embodiment",
-                      device: str = "cuda"):
-    """Build a N1.7 Gr00tPolicy. Import is local so this module loads in any env.
-
-    N1.7 (gr00t/policy/gr00t_policy.py L74-81) 시그니처:
-        Gr00tPolicy(embodiment_tag, model_path, *, device, strict=True)
-    - modality_config/modality_transform/denoising_steps 인자 없음.
-      finetune 시 --modality-config-path 로 준 config 가 체크포인트(processor)에 저장되어
-      inference 시 자동 로딩됨 (공식 policy.md). 즉 deploy 는 embodiment_tag + model_path
-      + device 만 필요. DATA_CONFIG_MAP 불필요 (N1.7 은 gr00t/configs/data 로 이동, deploy 무관).
-    - language_key 도 체크포인트에서 자동 (policy.language_key = modality_keys[0]).
+    DP action 28D 레이아웃 (convert_to_dp 와 동일):
+        [0:7]=left_arm, [7:14]=right_arm, [14:21]=left_hand, [21:28]=right_hand.
+    write_shm 의 fixed-shape (waist3+head2+arm14, hand14) 에 맞춰:
+        full[T,19] = [waist3=0, head2=0, left_arm7, right_arm7]
+        hand[T,14|12] = [left_hand, right_hand]  (DEX3=14, inspire=12)
+    waist/head 는 DP 가 제어 안 함 (학습 28D = arm+hand) → zero.
     """
-    from gr00t.policy import Gr00tPolicy
-    return Gr00tPolicy(
-        embodiment_tag=embodiment_tag,
-        model_path=model_path,
-        device=device,
-    )
+    chunk = np.asarray(action_chunk, dtype=np.float32)
+    if chunk.ndim == 3:          # (B,T,28) → (T,28)
+        chunk = chunk[0]
+    T = chunk.shape[0]
+    hd = 7 if hand_type == 'dex3' else 6
+    left_arm   = chunk[:, 0:7]
+    right_arm  = chunk[:, 7:14]
+    left_hand  = chunk[:, 14:14 + hd]
+    right_hand = chunk[:, 14 + 7:14 + 7 + hd]   # 학습이 7+7=14 로 저장(DEX3). inspire 면 앞 hd 만.
+    waist = np.zeros((T, 3), dtype=np.float32)
+    head  = np.zeros((T, 2), dtype=np.float32)
+    full = np.concatenate([waist, head, left_arm, right_arm], axis=1)   # (T,19)
+    hand = np.concatenate([left_hand, right_hand], axis=1)              # (T, 2*hd)
+    return full, hand
+
+
+# =============================================================================
+# Lazy Diffusion Policy loader
+# =============================================================================
+
+def init_dp_policy(ckpt_path: str, device: str = "cuda"):
+    """Load a Diffusion Policy from a .ckpt. Import is local so module loads in any env.
+
+    체크포인트 구조 (base_workspace.py save_checkpoint): payload = {cfg, state_dicts, pickles}.
+    로딩 (create_from_checkpoint / load_payload 패턴):
+      1. torch.load(ckpt, pickle_module=dill) → payload
+      2. payload['cfg'] 로 workspace 클래스 인스턴스화 (hydra.utils.get_class)
+      3. workspace.load_payload(payload) → state_dicts 로딩
+      4. ema_model(use_ema) 또는 model 이 추론 policy
+      5. policy.eval().to(device), reset()
+    반환: (policy, cfg) — cfg 에서 n_obs_steps/n_action_steps 등 추론 파라미터 추출.
+    """
+    import dill
+    import torch
+    import hydra
+
+    payload = torch.load(open(ckpt_path, "rb"), pickle_module=dill, map_location="cpu")
+    cfg = payload["cfg"]
+    cls = hydra.utils.get_class(cfg._target_)        # workspace 클래스
+    workspace = cls(cfg)
+    workspace.load_payload(payload, exclude_keys=None, include_keys=None)
+
+    # EMA 가중치 우선 (학습 시 use_ema=True 면 ema_model 이 보통 더 좋음).
+    policy = workspace.model
+    use_ema = bool(getattr(cfg.training, "use_ema", False))
+    if use_ema and hasattr(workspace, "ema_model") and workspace.ema_model is not None:
+        policy = workspace.ema_model
+
+    device_t = torch.device(device)
+    policy.eval().to(device_t)
+    if hasattr(policy, "reset"):
+        policy.reset()
+    logger_mp.info(f"[DeployDP] policy loaded. use_ema={use_ema} "
+                   f"n_obs_steps={cfg.n_obs_steps} n_action_steps={cfg.n_action_steps} "
+                   f"horizon={cfg.horizon} device={device}")
+    return policy, cfg
 
 
 # =============================================================================
 # Inference worker
 # =============================================================================
 
-class Gr00t_Inference:
-    """GR00T inference worker. hand_type + camera roles 자동 분기 (Phase L1).
+class DP_Inference:
+    """Diffusion Policy inference worker. GR00T worker 골격 재사용, 모델/obs 만 DP 로.
+
+    - slow loop (default 10Hz, DP 학습 다운샘플): obs 히스토리(deque, To=n_obs_steps) →
+      policy.predict_action → (n_action_steps,28) → upsample(10→fast) → cross-fade →
+      primary_actions 저장.
+    - fast loop (default 60Hz, arm 제어): pop 1 step, action_method, write ROBOT_ACTION.
+    - policy 는 record_mode_shm.deploy=True 인 첫 slow tick 에 lazy 로딩.
 
     - slow loop (default 20Hz): read obs, call policy, upsample to fast_hz,
       blend cross-fade with the tail of the previous chunk, store as
       `self.primary_actions / primary_hand_actions`.
-    - fast loop (default 60Hz): pop one timestep, apply --action_method,
+    - fast loop (default 50Hz): pop one timestep, apply --action_method,
       write to ROBOT_ACTION.
     - policy is loaded lazily on the first slow tick where
       record_mode_shm.deploy is True.
@@ -224,25 +264,22 @@ class Gr00t_Inference:
         shared_lock: dict,
         shared_event: dict,
         mode: str = "gr00t_rs_multi",           # {"gr00t_rs_multi", "gr00t_zed"}
-        model_path: str = "",
-        data_config_key: str = "unitree_g1",
-        embodiment_tag: str = "new_embodiment",
+        model_path: str = "",                   # DP .ckpt 경로
         action_method: str = "tem",             # {"base", "maf", "tem"}
         decay: float = 0.3,
         window_size: int = 5,
-        slow_hz: float = 20.0,
+        slow_hz: float = 10.0,                  # DP 학습 60→10 다운샘플 타임스텝
         fast_hz: float = 60.0,                  # arm 제어 루프(worker_g1_ctrl ACT_HZ=60)와 일치
-        denoising_steps: int = 4,
-        device: str = "cuda",                   # N1.7 Gr00tPolicy device
+        device: str = "cuda",
         binocular: bool = True,
         masking: bool = False,
         lag_compensate: bool = True,
         lag_log_every: int = 50,
-        obs_ts_policy: str = 'min',             # Phase L2: 'min' (stale 기준) | 'max'
-        modality_json_path: Optional[str] = None,  # Phase M4 (PART3 §2.5): 학습 데이터셋의 modality.json
+        obs_ts_policy: str = 'min',
+        modality_json_path: Optional[str] = None,
+        camera_key_map: Optional[Dict[str, str]] = None,  # {role: camera_N} (shape_meta 키와 일치)
     ):
         assert mode in ("gr00t_rs_multi", "gr00t_zed", "gr00t"), f"unsupported mode: {mode}"
-        # 'gr00t' (legacy single RealSense) 는 alias for gr00t_rs_multi (ego only).
         if mode == "gr00t":
             mode = "gr00t_rs_multi"
         assert action_method in ("base", "maf", "tem"), f"unknown method: {action_method}"
@@ -253,10 +290,7 @@ class Gr00t_Inference:
         self.zed_mode     = (mode == "gr00t_zed")
         self.binocular    = bool(binocular and self.zed_mode)
         self.masking      = bool(masking)
-        self.model_path   = model_path
-        self.data_config_key = data_config_key   # N1.7 미사용 (체크포인트 자동 로딩). 하위호환용.
-        self.embodiment_tag  = embodiment_tag
-        self.denoising_steps = int(denoising_steps)  # N1.7 Gr00tPolicy 생성 인자 아님. 미사용.
+        self.model_path   = model_path          # DP .ckpt
         self.device          = device
         self.action_method   = action_method
         self.decay           = float(decay)
@@ -267,9 +301,21 @@ class Gr00t_Inference:
         self.lag_log_every   = max(1, int(lag_log_every))
         self.obs_ts_policy   = obs_ts_policy
         self.modality_json_path = modality_json_path
+        # role → camera_N (shape_meta g1_dex3_image.yaml 의 obs 키와 일치).
+        self.camera_key_map = camera_key_map or {
+            "ego": "camera_0", "wrist_l": "camera_1", "wrist_r": "camera_2",
+            # ZED fallback
+            "ego_left": "camera_0", "ego_right": "camera_1",
+        }
         self._lag_chunk_count = 0
         self._lag_ns_acc      = 0
         self._lag_ns_max      = 0
+        # DP 추론 파라미터 (정책 로딩 시 cfg 에서 갱신).
+        self.n_obs_steps     = 2
+        self.n_action_steps  = 8
+        self.cfg             = None
+        # obs 히스토리 (To 프레임 누적). 키별 deque.
+        self._obs_hist       = None   # 로딩 후 deque(maxlen=n_obs_steps) 초기화
 
         # SHM handles + hand_type / active camera roles 결정 + modality layout 로드
         self._init_shm(shm_name, shared_lock)
@@ -279,9 +325,6 @@ class Gr00t_Inference:
         self._obs_lock     = threading.Lock()
         self._ctrl_lock    = threading.Lock()
         self.policy        = None
-        # N1.7 language_key 기본값 (정책 로딩 시 policy.language_key 로 갱신).
-        # build_obs_dict 가 정책 로딩 전 호출돼도 AttributeError 방지.
-        self.language_key  = "annotation.human.task_description"
         self.deploy_mode   = False
         self.start_loop    = False
         self.qpos          = np.zeros(19, dtype=np.float32)
@@ -302,7 +345,7 @@ class Gr00t_Inference:
         self._slow_thread.start()
         self._fast_thread.start()
         logger_mp.info(
-            f"[Deploy] Gr00t_Inference started (mode={mode}, hand={self.hand_type}, "
+            f"[Deploy] DP_Inference started (mode={mode}, hand={self.hand_type}, "
             f"camera_roles={self.camera_roles}, action_method={action_method}, "
             f"slow={slow_hz}Hz, fast={fast_hz}Hz, obs_ts_policy={obs_ts_policy})"
         )
@@ -393,23 +436,16 @@ class Gr00t_Inference:
         else:
             self.camera_roles = list(self.camera_shms.keys())
 
-    def _init_gr00t_policy(self):
-        try:
-            task_name = self.gr00t_task_shm.read_data()["task_name"].item().strip()
-        except Exception:
-            task_name = ""
-        self.task_name = task_name
-        self.policy = init_gr00t_policy(
-            model_path=self.model_path,
-            embodiment_tag=self.embodiment_tag,
-            device=self.device,
-        )
-        # N1.7: language_key 는 체크포인트에서 자동 결정됨 (policy.language_key).
-        # build_obs_dict 에 넘겨 학습-추론 language 키 정합 보장.
-        self.language_key = getattr(self.policy, "language_key",
-                                    "annotation.human.task_description")
-        logger_mp.info(f"[Deploy] Policy loaded (N1.7). embodiment={self.embodiment_tag} "
-                       f"language_key={self.language_key!r} task={task_name!r}")
+    def _init_policy(self):
+        self.policy, self.cfg = init_dp_policy(self.model_path, device=self.device)
+        # cfg 에서 추론 파라미터 추출.
+        self.n_obs_steps    = int(self.cfg.n_obs_steps)
+        self.n_action_steps = int(self.cfg.n_action_steps)
+        # obs 히스토리 deque 초기화 (키별 maxlen=n_obs_steps).
+        self._obs_hist = deque(maxlen=self.n_obs_steps)
+        logger_mp.info(f"[DeployDP] ready. n_obs_steps={self.n_obs_steps} "
+                       f"n_action_steps={self.n_action_steps} slow={self.slow_hz}Hz "
+                       f"fast={self.fast_hz}Hz")
 
     # ----- observation -------------------------------------------------------
     def get_real_obs(self):
@@ -430,10 +466,7 @@ class Gr00t_Inference:
         qpos      = np.concatenate([obs_waist, obs_head, obs_arm]).astype(np.float32)
         hand_qpos = np.asarray(obs_hand_arr, dtype=np.float32)
 
-        try:
-            self.task_name = self.gr00t_task_shm.read_data()["task_name"].item().strip()
-        except Exception:
-            pass
+        # DP 는 language 미사용 — task_name 읽기 불필요 (단일 task).
 
         # 카메라 frame + ts read. Phase L2: ts 후보에 카메라 ts 도 포함.
         ts_candidates = [t for t in (ts_body, ts_hand) if t > 0]
@@ -477,9 +510,9 @@ class Gr00t_Inference:
                 frames[role] = rgb
             if not frames:
                 return None
-        # Phase M4 (PART3 §2.5): 동적 obs dict (layout 기반). N1.7: 중첩 dict + language_key.
-        obs = build_obs_dict(self.task_name, qpos, hand_qpos, frames,
-                             self.hand_type, self.layout, self.language_key)
+        # DP: 단일 프레임 obs 추출 (state 28D + camera_N CHW float32 [0,1]).
+        frame_obs = build_obs_frame(qpos, hand_qpos, frames,
+                                    self.hand_type, self.camera_key_map)
 
         if not ts_candidates:
             return None
@@ -488,40 +521,50 @@ class Gr00t_Inference:
         else:
             obs_ts_ns = max(ts_candidates)
 
+        # obs 히스토리 누적 (To=n_obs_steps). deque 가 maxlen 으로 오래된 것 자동 제거.
+        if self._obs_hist is None:
+            self._obs_hist = deque(maxlen=self.n_obs_steps)
+        self._obs_hist.append(frame_obs)
+        # To 개 미만이면 첫 프레임 복제로 패딩 (시작 시).
+        hist = list(self._obs_hist)
+        while len(hist) < self.n_obs_steps:
+            hist.insert(0, hist[0])
+
+        # (1, To, *) 텐서 dict 구성 — predict_action 입력 형식.
+        import torch
+        obs: Dict[str, "torch.Tensor"] = {}
+        keys = hist[-1].keys()
+        for k in keys:
+            stacked = np.stack([h[k] for h in hist], axis=0)   # (To, *)
+            obs[k] = torch.from_numpy(stacked[None, ...]).float()  # (1, To, *)
+
         with self._obs_lock:
             self.qpos      = qpos
             self.hand_qpos = hand_qpos
         return (obs, obs_ts_ns)
 
     # ----- inference + chunk handling ---------------------------------------
-    def gr00t_inference(self, obs: dict, obs_ts_ns: int):
-        """policy.get_action → upsample → lag trim → cross-fade → latch primary_*"""
+    def dp_inference(self, obs: dict, obs_ts_ns: int):
+        """policy.predict_action → upsample → lag trim → cross-fade → latch primary_*"""
         if self.policy is None:
             return
-        # N1.7 get_action 은 (action, info) 튜플 반환 (policy.py L80-105 return action, info).
-        action, _info = self.policy.get_action(obs)
+        import torch
+        # DP predict_action 입력: {key: (1,To,*)}, 출력: {action:(1,Ta,28), action_pred:...}.
+        dev = next(self.policy.parameters()).device
+        obs_dev = {k: v.to(dev) for k, v in obs.items()}
+        with torch.no_grad():
+            result = self.policy.predict_action(obs_dev)
+        action_chunk = result["action"].detach().cpu().numpy()   # (1, n_action_steps, 28)
         t_after_ns = time.perf_counter_ns()
 
-        # chunk 길이 T: action key 중 첫 활성 key 의 shape 에서 추출.
-        # N1.7 Gr00tPolicy 직접 사용 → 키 접두사 없음 (left_arm 등). g1_dex3 action
-        # modality_keys 에 waist/head 없으므로 left_arm 사용 (항상 존재).
-        first_key = "waist" if "waist" in action else "left_arm"
-        T = action[first_key].shape[1]
-        full = []
-        hand = []
-        for i in range(T):
-            a_np, h_np = action_to_array(action, i, self.hand_type, self.layout)
-            full.append(a_np)
-            hand.append(h_np)
-        full = np.stack(full, axis=0)
-        hand = np.stack(hand, axis=0)
+        # DP action 28D = arm14+hand14 분해 → (T,19 full), (T,14|12 hand).
+        full, hand = dp_action_chunk_to_arrays(action_chunk, self.hand_type)
 
-        # Phase L3 (P1-3): arm/waist = spline(k=5), hand = linear(k=1).
-        # hand 는 grasp toggle 같은 이산/포화 신호라 quintic spline 시 overshoot.
+        # arm = spline(k=5), hand = linear(k=1). 10→fast(60) 업샘플.
         full_up = upsample_actions(full, slow_hz=self.slow_hz, fast_hz=self.fast_hz, k=5)
         hand_up = upsample_actions(hand, slow_hz=self.slow_hz, fast_hz=self.fast_hz, k=1)
 
-        # ---- Phase E: lag compensation (Part 2 §2: stale 기준 obs_ts 사용) ----
+        # ---- lag compensation (stale 기준 obs_ts 사용) ----
         lag_ns       = max(0, t_after_ns - obs_ts_ns)
         trim_samples = int(round(lag_ns * self.fast_hz / 1e9)) if self.lag_compensate else 0
         if trim_samples > 0 and trim_samples < len(full_up) - 1:
@@ -642,7 +685,7 @@ class Gr00t_Inference:
         if res is None:
             return
         obs, obs_ts_ns = res
-        self.gr00t_inference(obs, obs_ts_ns)
+        self.dp_inference(obs, obs_ts_ns)
 
     def do_fast(self):
         a, h = self.get_action()
@@ -657,19 +700,22 @@ class Gr00t_Inference:
             if self.deploy_mode:
                 if self.policy is None:
                     try:
-                        self._init_gr00t_policy()
+                        self._init_policy()
                     except Exception as e:
-                        logger_mp.exception(f"[Deploy] policy init failed: {e}")
+                        logger_mp.exception(f"[DeployDP] policy init failed: {e}")
                         time.sleep(1.0); continue
                 try:
                     self.do_slow()
                 except Exception as e:
-                    logger_mp.exception(f"[Deploy] slow loop error: {e}")
+                    logger_mp.exception(f"[DeployDP] slow loop error: {e}")
             else:
                 with self._ctrl_lock:
                     self.primary_actions = None
                     self.primary_hand_actions = None
                     self.primary_index = 0
+                # deploy 종료 시 obs 히스토리 초기화 (다음 시작 시 fresh).
+                if self._obs_hist is not None:
+                    self._obs_hist.clear()
                 self.start_loop = False
             next_t += period
             sleep = next_t - time.perf_counter()
@@ -711,4 +757,4 @@ class Gr00t_Inference:
             if s is not None:
                 try: s.worker_close()
                 except Exception: pass
-        logger_mp.info("[Deploy] Gr00t_Inference stopped.")
+        logger_mp.info("[Deploy] DP_Inference stopped.")

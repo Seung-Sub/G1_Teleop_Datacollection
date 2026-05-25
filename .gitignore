@@ -26,8 +26,16 @@ dist/
 record/**/data/
 record/**/videos/
 record/**/meta/
+record/**/*.zarr/
+record_gr00t/
 *.parquet
 *.mp4
+
+# Manual artifact bundles (임시 패키징 zip)
+*.zip
+
+# Claude Code 내부 상태 (세션 lockfile 등)
+.claude/
 
 # OS
 .DS_Store

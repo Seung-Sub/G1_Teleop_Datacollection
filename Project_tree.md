@@ -10,10 +10,19 @@
 ```
 G1_Teleoperation/
 ├── main.py                    Teleoperation entry — SHM owner, worker spawn, CLI (--hand/camera/vr-input/waist/head/lower-body/gait/tactile/no-robot). preflight cleanup + SIGTERM 핸들러 + PIDFILE
-├── evaluate.py                External policy eval entry (별도 conda env, --lag-compensate)
+├── evaluate.py                GR00T N1.7 정책 eval entry (별도 conda env, --lag-compensate, --device)
+├── evaluate_dp.py             Diffusion Policy eval entry (별도 conda env, --slow-hz 10 / --fast-hz 60)
 ├── setup.py                   pip install -e . 진입
 ├── README.md                  본 워크스페이스 통합 가이드
 ├── Project_tree.md            (이 파일)
+├── GR00T_PIPELINE_GUIDE.md    수집 → GR00T 변환(60→20fps) → stats → 학습 → 추론 end-to-end 절차
+├── GR00T_N17_deploy_analysis.md  N1.7 Gr00tPolicy 정합 분석 (배포 측 변경 근거)
+├── check_dex3_recv.py         DEX3 state DDS 수신 단독 진단 (main.py 끄고)
+├── check_dex3_state.py        DEX3 state 추가 단독 진단
+├── check_dex3_grasp.py        DEX3 grasp 추가 단독 진단
+├── check_pipeline_live.py     main.py RUN 중 모든 SHM 의 실 hz / 신선도 / 지터 측정
+├── verify_episode.py          저장된 에피소드 종합 검증 (60Hz 정렬, raw_ts_*, 영상-상태 정합)
+├── verify_trajectory.py       에피소드 시계열 궤적 정밀 진단 (점프/추종오차/범위, PNG)
 │
 ├── docs/
 │   ├── HARDWARE.md            Quest3/G1/DEX3/Inspire/DXL/ZED/RealSense IDL·msg·Hz·latency (SDK 사실 기반)
@@ -39,9 +48,10 @@ G1_Teleoperation/
 │   ├── worker_hand_ctrl.py    Inspire 6 / DEX3 7 motor 양손, trigger toggle, replay/deploy 분기. DEX3 rate-limit + 좌우 거울대칭 (PART6)
 │   ├── worker_hand_dds.py     Inspire RH56 Modbus touch sensor poller (DEX3 미해당). DEX3 press_sensor_state length-only logging 지원 (--tactile on, Phase K8)
 │   ├── worker_zed.py          ZED stereo direct(USB)/stream + ArUco + depth + workspace mask (Phase F serial 인자)
-│   ├── worker_camera.py       RealSense color@30Hz (D435i/455/405). serial 별 인스턴스 → role-based CAMERA SHM (Phase K7 멀티)
+│   ├── worker_camera.py       RealSense color 60fps 640x360 (D435i/455/405). serial 별 인스턴스 → role-based CAMERA_VIEW SHM (Phase K7 멀티)
 │   ├── worker_record.py       FSM 외부 20Hz + RecordCollectors thread + align_and_save_episode (Phase D 78% rewrite). 멀티 카메라 / DEX3 7×2 / modality.json 토글 반영 (K~M)
-│   ├── worker_deploy_policy.py  Gr00t_Inference slow(20Hz)/fast(50Hz) + cross-fade + lag-trim (Phase E)
+│   ├── worker_deploy_policy.py  N1.7 Gr00tPolicy slow(20Hz)/fast(60Hz) + cross-fade + lag-trim (Phase E + N1.7 refactor)
+│   ├── worker_deploy_dp.py    Diffusion Policy slow(10Hz)/fast(60Hz), n_obs_steps=2 deque, 평탄 obs dict
 │   ├── worker_plot.py         matplotlib realtime qpos/action plot (50Hz)
 │   ├── worker_g1_visualization.py  Meshcat 시각화 (현재 main.py 미사용 — 옵션)
 │   ├── keyboard_listener.py   q=shutdown, h=go_home
@@ -104,8 +114,12 @@ G1_Teleoperation/
 │   └── ui_launcher.py         PyQt5 TeleopUI — 카메라뷰 (CAMERA_VIEW role SHM, Part5), 진행률, 터치맵, set/start/reset/replay/deploy/home 버튼. workspace_mask 가드 (검은 화면 회피)
 │
 ├── data_refinement/
-│   ├── convert_to_dp.py       LeRobot v2.1 → Diffusion Policy zarr replay buffer
+│   ├── convert_to_dp.py       LeRobot v2.1 → Diffusion Policy zarr (60→10fps 정수배 step 다운샘플)
+│   ├── convert_to_gr00t.py    LeRobot v2.1 → GR00T 학습 형식 (60→20fps, info/episodes/tasks/modality 메타)
+│   ├── convert_to_gr00t_multitask.py  다중 task 묶음 GR00T 변환
 │   ├── convert_to_act.py      LeRobot v2.1 → ACT per-episode HDF5
+│   ├── verify_dp_dataset.py   DP zarr 검증
+│   ├── verify_gr00t_dataset.py  GR00T 변환 결과 검증 (meta/차원/영상-상태 정합)
 │   ├── merge_parquet_data.py  여러 task / chunk 합치기
 │   ├── sequential_merge.py    episode 순차 병합
 │   ├── inspect_parquet.py     parquet schema + row 출력
@@ -149,6 +163,9 @@ G1_Teleoperation/
 | **PART6 shutdown** | `6b3a17a` | hoist 종료 시 damp_to_release 로 팔 부드럽게 힘 빼기 |
 | **VuerXR fix** | `9cef419`, `2995d94`, `285b0d6` | WebXR hand-tracking 강제 OFF + WebSocket URL port 누락 패치 (`scripts/patch_vuer_xr.py`) |
 | **STEP 2~6 bringup** | `6dab495`~`15fc35f` | NIC 갱신, cameras.yaml D405×2, QUEST3 jammy adb, cv2↔PyQt5 Qt 충돌 해결, preflight cleanup + ego mask 가드 |
+| **60Hz pipeline** | `78486d0` | 전 파이프라인 60Hz 정렬축 통일 (camera 60fps + IK/제어/VR 60Hz + record axis 60Hz). 360 해상도 (16:9 native) |
+| **Robustness + replay layout + SET-task** | `31a0b60` | mat_tool NaN guard, IK NaN guard(last_good fallback), vuer session-close silent. replay 가 modality.json 으로 동적 layout 복원. SET 버튼이 코드 재실행 없이 task 전환 |
+| **GR00T N1.7 deploy + DP deploy + 변환 유틸** | (다음 커밋) | evaluate.py N1.7 시그니처 정합 (Gr00tPolicy embodiment_tag + model_path + device only). evaluate_dp.py + worker_deploy_dp.py 신설. convert_to_gr00t + verify 유틸. .gitignore 정리(.claude/, *.zarr, record_gr00t/, *.zip) |
 
 상세는 [`README.md`](README.md), [`docs/HARDWARE.md`](docs/HARDWARE.md),
 [`docs/INSTALL.md`](docs/INSTALL.md).

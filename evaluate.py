@@ -73,18 +73,23 @@ def _parse_args():
     p.add_argument("--model-path",    required=True,
                    help="GR00T checkpoint 디렉토리 (예: /path/to/checkpoint-100000)")
     p.add_argument("--data-config-key", default="unitree_g1",
-                   help="gr00t.experiment.data_config.DATA_CONFIG_MAP 의 키. "
-                        "사용자 운용 (DEX3+RS3뷰) 시 학습 측에 신규 DataConfig 등록 필요. "
-                        "기본값은 legacy unitree_g1 — 운용 시 학습한 키로 override 할 것.")
+                   help="[N1.7 미사용] N1.5/1.6 의 DATA_CONFIG_MAP 키였음. N1.7 은 finetune 시 "
+                        "--modality-config-path 로 준 config 가 체크포인트에 저장되어 추론 시 "
+                        "자동 로딩되므로 불필요. 하위호환 위해 인자만 유지.")
     p.add_argument("--embodiment-tag", default="new_embodiment")
+    p.add_argument("--device", default="cuda",
+                   help="N1.7 Gr00tPolicy device (예: cuda, cuda:0, cpu). 추론 GPU 지정.")
     p.add_argument("--action-method", choices=["base", "maf", "tem"], default="tem")
     p.add_argument("--decay",         type=float, default=0.3,
                    help="TEM decay 계수")
     p.add_argument("--window-size",   type=int,   default=5,
                    help="MAF/TEM 윈도우 길이")
-    p.add_argument("--slow-hz",       type=float, default=20.0)
-    p.add_argument("--fast-hz",       type=float, default=50.0)
-    p.add_argument("--denoising-steps", type=int, default=4)
+    p.add_argument("--slow-hz",       type=float, default=20.0,
+                   help="추론 주기. GR00T action chunk step 이 20Hz(학습 데이터 다운샘플) 타임스텝.")
+    p.add_argument("--fast-hz",       type=float, default=60.0,
+                   help="action 실행/업샘플 주기. arm 제어 루프(worker_g1_ctrl ACT_HZ=60)와 일치.")
+    p.add_argument("--denoising-steps", type=int, default=4,
+                   help="[N1.7 미사용] Gr00tPolicy 생성 인자 아님(모델 설정 내장). 하위호환용.")
     p.add_argument("--binocular", dest="binocular", action="store_true", default=True,
                    help="(ZED 전용) stereo 양안 활성")
     p.add_argument("--no-binocular", dest="binocular", action="store_false",
@@ -127,6 +132,7 @@ def main():
         model_path    =args.model_path,
         data_config_key=args.data_config_key,
         embodiment_tag=args.embodiment_tag,
+        device        =args.device,
         action_method =args.action_method,
         decay         =args.decay,
         window_size   =args.window_size,
@@ -143,7 +149,7 @@ def main():
 
     print(f"[evaluate] Running. UI must set Deploy=True to start policy loading.")
     print(f"[evaluate] mode={args.mode} action_method={args.action_method} "
-          f"slow={args.slow_hz}Hz fast={args.fast_hz}Hz "
+          f"slow={args.slow_hz}Hz fast={args.fast_hz}Hz device={args.device} "
           f"lag_compensate={args.lag_compensate} obs_ts_policy={args.obs_ts_policy}")
     try:
         while not shared_event["shutdown"].is_set():

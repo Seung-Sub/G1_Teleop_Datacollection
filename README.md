@@ -47,7 +47,7 @@ Unitree **G1** 휴머노이드 (양손 **Inspire** 또는 **DEX3**) 를 **Meta Q
 - **Multi-modal time alignment**
   - 8 개 streaming SHM 마다 `*_ts` (monotonic ns) 필드
   - 모든 stream 의 raw timestamp + 데이터를 episode 동안 background poller 가 collect
-  - 에피소드 close 시 50 Hz 공통 시간축 → linear (continuous) / ZOH (image, discrete) 보간
+  - 에피소드 close 시 60 Hz 공통 시간축 → linear (continuous) / ZOH (image, discrete) 보간
 - **External-policy 평가 + inference-lag 보상**
   - `evaluate.py` 가 별도 conda env (예: gr00t) 에서 ROBOT_OBS 읽어 policy.get_action
   - chunk 앞부분을 `t_publish - t_obs` 만큼 trim → robot 도달 시각이 정렬됨
@@ -73,10 +73,10 @@ Unitree **G1** 휴머노이드 (양손 **Inspire** 또는 **DEX3**) 를 **Meta Q
 │    pose + trigger    │      │
 │    + grip + buttons  │      ▼
 └──────────────────────┘   worker_vr  ──►  TELEVISION SHM
-                            (50Hz)         QUEST_CONTROLLER SHM
+                            (60Hz)         QUEST_CONTROLLER SHM
                                               │
                                               ▼
-                                  worker_g1_ik (50Hz)
+                                  worker_g1_ik (60Hz)
                                   - SE(3) clutch on grip-hold
                                   - HMD R_delta → waist (옵션)
                                   - Right-A 3s cosine recovery
@@ -85,30 +85,30 @@ Unitree **G1** 휴머노이드 (양손 **Inspire** 또는 **DEX3**) 를 **Meta Q
                           ROBOT_ACTION SHM ◄──┘
                                   │
                                   ▼
-                          worker_g1_ctrl (250Hz cmd / 500Hz obs)
+                          worker_g1_ctrl (60Hz cmd / 300Hz obs)
                           - LowCmd_ / LowState_ DDS
                           - Dynamixel head (--head dxl)
                           - ROBOT_OBS SHM (300Hz)
 
-                  worker_hand_ctrl (50Hz)
+                  worker_hand_ctrl (100Hz)
                   ├─ Inspire DDS rt/inspire_hand/ctrl/{l,r}
                   └─ DEX3 DDS    rt/dex3/{left,right}/{cmd,state}
 
-                  worker_zed (~30Hz)  or  worker_camera (RealSense ~30Hz)
+                  worker_zed (~30Hz)  or  worker_camera (RealSense 60fps 640x360)
                           │
                           ▼
-                      CAMERA SHM ─► ego_left/right or realsense + ts
+                      CAMERA_VIEW SHM ─► ego / wrist_l / wrist_r (각 640x360, 60fps) + ts
 
                   worker_record (FSM 외부 20Hz)
                   ├─ start: RecordCollectors 시작 (3 poller thread)
                   │   - robot poller 1kHz : obs_body / obs_hand / action_body/hand
                   │   - tv poller 200Hz   : television + controller
-                  │   - camera poller 100Hz : zed left/right or realsense
+                  │   - camera poller 100Hz : zed left/right or 3× realsense view
                   ├─ stop: stop_and_dump → align_and_save_episode
-                  │   - common_time_axis 50Hz (intersection)
+                  │   - common_time_axis 60Hz (intersection)
                   │   - linear-interp continuous, ZOH images
-                  │   - ParquetSink + extra_columns(raw_ts_*) + VideoSink
-                  └─ LeRobot v2.1 dataset layout 유지
+                  │   - ParquetSink + extra_columns(raw_ts_*) + VideoSink (각 view mp4)
+                  └─ LeRobot v2.1 dataset layout — modality.json 자동 생성 (utils/modality_layout)
 ```
 
 ### 2-2. 모듈 책임 한 줄 요약
@@ -116,7 +116,8 @@ Unitree **G1** 휴머노이드 (양손 **Inspire** 또는 **DEX3**) 를 **Meta Q
 | 영역 | 모듈 | 역할 |
 |---|---|---|
 | Entry | `main.py` | CLI parse → SHM owner-create → worker spawn |
-| Eval entry | `evaluate.py` | 별도 conda env 에서 GR00T 정책 평가 (lag-compensate) |
+| Eval entry (GR00T) | `evaluate.py` | 별도 conda env 에서 GR00T N1.7 Gr00tPolicy 평가 (lag-compensate) |
+| Eval entry (DP) | `evaluate_dp.py` | 별도 conda env 에서 Diffusion Policy .ckpt 평가 |
 | VR 입력 | `open_television/television.py`, `tv_wrapper.py`, `workers/worker_vr.py` | Vuer 이벤트 → SHM, OpenXR→Robot 기저 변환 |
 | IK | `g1_control/g1_ik.py`, `workers/worker_g1_ik.py` | Pinocchio+CasADi IPOPT, clutch + recovery + waist clutch |
 | G1 본체 | `g1_control/g1_whole_control.py`, `workers/worker_g1_ctrl.py` | LowCmd_/LowState_ DualRate 50/300Hz, `damp_to_release` 안전 종료 |
@@ -127,7 +128,8 @@ Unitree **G1** 휴머노이드 (양손 **Inspire** 또는 **DEX3**) 를 **Meta Q
 | 카메라 | `workers/worker_zed.py`, `worker_camera.py`, `utils/camera_discovery.py` | direct/stream, RealSense first auto-detect |
 | 정렬 | `utils/raw_stream.py`, `utils/align.py`, `utils/record_collectors.py` | RawStreamBuffer dedup + interp_to_axis + common_time_axis |
 | 저장 | `utils/parquet_sink.py`, `utils/video_sink.py` | LeRobot v2.1 + raw_ts_* extra |
-| 정책 평가 | `workers/worker_deploy_policy.py` | slow(20Hz)/fast(50Hz) + cross-fade + lag trim |
+| 정책 평가 (GR00T) | `workers/worker_deploy_policy.py` | N1.7 Gr00tPolicy slow(20Hz)/fast(60Hz) + cross-fade + lag trim |
+| 정책 평가 (DP) | `workers/worker_deploy_dp.py` | DP slow(10Hz)/fast(60Hz), n_obs_steps deque, 평탄 obs dict |
 | UI | `gui/ui_launcher.py` | PyQt5 — 카메라뷰, 진행률, 터치맵, 모드 토글 |
 | 키보드 | `workers/keyboard_listener.py` | `q`=shutdown, `h`=go_home |
 | 보조 | `utils/mat_tool.py` | cosine_ease, se3_interp (quat slerp), fast_mat_inv |
@@ -344,11 +346,11 @@ None 으로 리셋되어 다음 grip 시 재캡처.
 
 | SHM | TS field(s) | writer | 주기 |
 |---|---|---|---|
-| ROBOT_OBS | `obs_body_ts`, `obs_hand_ts` | worker_g1_ctrl, worker_hand_ctrl | 300Hz / 50Hz |
-| ROBOT_ACTION | `action_body_ts`, `action_hand_ts` | worker_g1_ik, worker_hand_ctrl, worker_deploy_policy | 50Hz |
-| CAMERA | `camera_zed_ts`, `camera_realsense_ts` | worker_zed, worker_camera | ~30Hz |
-| TELEVISION | `television_ts` | worker_vr | 50Hz |
-| QUEST_CONTROLLER | `controller_ts` | worker_vr | 50Hz |
+| ROBOT_OBS | `obs_body_ts`, `obs_hand_ts` | worker_g1_ctrl, worker_hand_ctrl | 300Hz / 100Hz |
+| ROBOT_ACTION | `action_body_ts`, `action_hand_ts` | worker_g1_ik, worker_hand_ctrl, worker_deploy_policy/dp | 60Hz / 100Hz |
+| CAMERA_VIEW (ego/wrist_l/wrist_r) | `frame_ts` | worker_zed or worker_camera | 60fps (RealSense) / ~30Hz (ZED) |
+| TELEVISION | `television_ts` | worker_vr | 60Hz |
+| QUEST_CONTROLLER | `controller_ts` | worker_vr | 60Hz |
 | LEFT/RIGHT_TOUCH | `l_touch_ts`, `r_touch_ts` | worker_hand_l/r_dds | ~100Hz |
 | DEPTH_MAP | `depth_map_ts` | worker_zed | ~30Hz |
 
@@ -370,7 +372,7 @@ None 으로 리셋되어 다음 grip 시 재캡처.
 ### 8-3. 에피소드 close → align_and_save_episode
 
 1. 모든 collector thread stop → `dump()` 로 raw (ts, payload) 시퀀스 획득
-2. `utils/align.common_time_axis` → 채워진 모든 stream 의 intersection 에 50 Hz uniform 축
+2. `utils/align.common_time_axis` → 채워진 모든 stream 의 intersection 에 60 Hz uniform 축
 3. 각 stream 을 `interp_to_axis` 로 정렬:
    - obs/action (continuous): `linear` (numpy.interp per-column)
    - camera frames: `zoh` (직전 sample frame 그대로 — 이미지 보간 X)
@@ -392,23 +394,52 @@ LeRobot v2.1 호환 파일 구조 (parquet + mp4) 유지.
 
 ## 9. 정책 평가 (eval)
 
-별도 conda env (`gr00t` 등) 에서 GR00T 정책 실행:
+두 가지 정책 경로 — **GR00T N1.7** 또는 **Diffusion Policy** — 별도 conda env 에서.
+
+### 9-1. GR00T N1.7 (`evaluate.py`)
+
+전체 파이프라인 (수집 60Hz → GR00T 변환 20fps → 학습 → 추론) 은
+[`GR00T_PIPELINE_GUIDE.md`](GR00T_PIPELINE_GUIDE.md) 참고. 배포 측 N1.7 정합 분석은
+[`GR00T_N17_deploy_analysis.md`](GR00T_N17_deploy_analysis.md).
 
 ```bash
 # Terminal 1 (teleop env)
 conda activate teleop
-python main.py --hand dex3 --camera auto --vr-input controller --waist fixed --head dxl
+python main.py --hand dex3 --camera realsense --vr-input controller \
+               --waist fixed --head off --lower-body hoist
 
 # Terminal 2 (gr00t env)
-conda activate gr00t
-python evaluate.py --mode gr00t_zed --model-path /path/to/checkpoint-XXXXX \
-    --data-config-key unitree_g1_inspire --action-method tem \
+conda activate groot
+python evaluate.py --mode gr00t_rs_multi --model-path /path/to/checkpoint-XXXXX \
+    --embodiment-tag new_embodiment --device cuda \
+    --action-method tem --slow-hz 20 --fast-hz 60 \
     --lag-compensate --lag-log-every 50
 ```
 
+N1.7 은 `Gr00tPolicy(embodiment_tag, model_path, *, device)` 시그니처. 학습 시
+지정한 `modality_config` 가 체크포인트(processor)에 저장되어 inference 시 자동
+로딩되므로 deploy 측에 별도 `data_config_key` 불필요. `--data-config-key` /
+`--denoising-steps` 는 하위호환 stub.
+
+### 9-2. Diffusion Policy (`evaluate_dp.py`)
+
+```bash
+# Terminal 1 (동일)
+# Terminal 2 (DP 학습 환경, 예: umi)
+conda activate umi
+python evaluate_dp.py --mode gr00t_rs_multi \
+    --model-path /path/to/checkpoints/latest.ckpt \
+    --slow-hz 10 --fast-hz 60
+```
+
+DP 는 단일 task / 평탄 obs dict / `n_obs_steps=2` 누적 / 60→10fps 학습이라
+slow-hz=10 기본. language/embodiment 인자 없음.
+
+### 9-3. 공통 — GUI Deploy
+
 GUI 의 Deploy 버튼 → `record_mode.deploy=True` + `set_start` 자동 set →
-evaluate.py 가 ROBOT_OBS 읽어 정책 호출 → ROBOT_ACTION publish → worker_g1_ctrl,
-worker_hand_ctrl 가 motor 명령.
+evaluate{,_dp}.py 가 ROBOT_OBS 읽어 정책 호출 → ROBOT_ACTION publish →
+worker_g1_ctrl, worker_hand_ctrl 가 motor 명령.
 
 **Inference-lag 보상**: `lag_ns = t_after_policy - obs_ts` 만큼 chunk 앞부분 trim →
 cross-fade. `--no-lag-compensate` 로 끄고 비교 가능.
@@ -519,9 +550,26 @@ GUI 의 freq_shm 값 (`g1_freq`, `hand_freq`, `vr_freq`, `camera_freq`) 가 안�
 
 ### 12-2. 주요 entry
 - `main.py` — Teleoperation + 데이터 수집
-- `evaluate.py` — 외부 정책 평가 (별도 conda env)
-- `scripts/verify_offline.py` — 하드웨어 0개 검증
+- `evaluate.py` — GR00T N1.7 정책 평가 (별도 conda env)
+- `evaluate_dp.py` — Diffusion Policy 평가 (별도 conda env)
+- `scripts/verify_offline.py` — 하드웨어 0개 검증 (코드/SHM/IK 빌드)
 - `scripts/verify_quest3.py` — Quest3 + IK 검증
+- `scripts/patch_vuer_xr.py` — vuer client JS 패치 (hand-tracking OFF + WS port)
+
+### 12-3. 진단 / 검증 스크립트 (루트)
+- `check_dex3_recv.py` — DEX3 state DDS 수신 단독 진단 (main.py 끄고 실행)
+- `check_dex3_state.py` / `check_dex3_grasp.py` — DEX3 추가 단독 진단
+- `check_pipeline_live.py` — main.py RUN 중 모든 SHM 의 실 hz / 신선도 / 지터 측정
+- `verify_episode.py` — 저장된 에피소드 (parquet+mp4) 종합 검증 (60Hz 정렬, raw_ts_*, 영상-상태 정합)
+- `verify_trajectory.py` — 에피소드 시계열 궤적 정밀 진단 (점프/추종오차/관절범위, PNG 저장)
+
+### 12-4. 데이터 변환
+- `data_refinement/convert_to_gr00t.py` — 60→20fps GR00T 학습 형식 변환 (단일 task)
+- `data_refinement/convert_to_gr00t_multitask.py` — 다중 task 묶음 변환
+- `data_refinement/verify_gr00t_dataset.py` — GR00T 변환 결과 검증
+- `data_refinement/convert_to_dp.py` — 60→10fps DP zarr 변환
+- `data_refinement/verify_dp_dataset.py` — DP zarr 검증
+- 그 외 ACT/merge/inspect/plot/mask 변환기 — `data_refinement/README.md`
 
 ### 12-3. 라이선스 & 감사
 
