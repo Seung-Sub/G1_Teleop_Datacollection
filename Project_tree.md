@@ -15,6 +15,7 @@ G1_Teleoperation/
 ├── setup.py                   pip install -e . 진입
 ├── README.md                  본 워크스페이스 통합 가이드
 ├── Project_tree.md            (이 파일)
+├── USAGE.md                   전체 entry point CLI 사용법 (수집/검증/변환/학습/배포 시나리오별 명령어)
 ├── GR00T_PIPELINE_GUIDE.md    수집 → GR00T 변환(60→20fps) → stats → 학습 → 추론 end-to-end 절차 (Phase A~D: video.delta_indices=[-20,0] / ACTION_HORIZON=40 / --allow-padding / episode 최소 10초 권장)
 ├── GR00T_N17_deploy_analysis.md  N1.7 Gr00tPolicy 정합 분석 (배포 측 변경 근거)
 ├── DP_PIPELINE_CHECKLIST.md   Diffusion Policy 수집/변환/학습/배포 운영 체크리스트 (사전 검증 완료 항목 명시)

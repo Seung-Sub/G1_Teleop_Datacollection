@@ -549,6 +549,7 @@ GUI 의 freq_shm 값 (`g1_freq`, `hand_freq`, `vr_freq`, `camera_freq`) 가 안�
 ## 12. 관련 문서 / 파일 인덱스
 
 ### 12-1. 문서
+- [`USAGE.md`](USAGE.md) — 전체 entry point 명령어/인자/시나리오별 사용법 (수집 → 검증 → 변환 → 학습 → 배포)
 - [`Project_tree.md`](Project_tree.md) — 디렉토리 트리 + 파일별 한 줄 설명
 - [`GR00T_PIPELINE_GUIDE.md`](GR00T_PIPELINE_GUIDE.md) — 수집 → GR00T 변환(60→20fps) → stats → 학습 → 추론 end-to-end. video.delta_indices=[-20,0] / ACTION_HORIZON=40 / allow_padding 운영 가이드 포함
 - [`GR00T_N17_deploy_analysis.md`](GR00T_N17_deploy_analysis.md) — N1.7 Gr00tPolicy 정합 분석 (배포 측 변경 근거)
