@@ -421,6 +421,13 @@ N1.7 은 `Gr00tPolicy(embodiment_tag, model_path, *, device)` 시그니처. 학�
 로딩되므로 deploy 측에 별도 `data_config_key` 불필요. `--data-config-key` /
 `--denoising-steps` 는 하위호환 stub.
 
+**Video temporal history (Phase B, 학습 정합)**: `g1_dex3_config.video.delta_indices=[-20, 0]`
+(20fps 다운샘플 후 -20 = 정확히 1초 전 frame) 이므로, deploy 는 카메라 60fps SHM 을
+별도 polling thread 가 ring buffer (per-camera 120 슬롯) 에 모아두고, 추론 시점마다
+`target_past_ts = now - 1.0s` 로 ts 기반 pick → `frames[role] = [past, current]` 두
+frame 을 학습과 동일 순서로 stack. warmup(<1초) 시 현재 frame 복제로 `allow_padding`
+clamp 와 일치하는 거동. (`workers/worker_deploy_policy.py:_CameraFrameRing`).
+
 ### 9-2. Diffusion Policy (`evaluate_dp.py`)
 
 ```bash
@@ -543,6 +550,9 @@ GUI 의 freq_shm 값 (`g1_freq`, `hand_freq`, `vr_freq`, `camera_freq`) 가 안�
 
 ### 12-1. 문서
 - [`Project_tree.md`](Project_tree.md) — 디렉토리 트리 + 파일별 한 줄 설명
+- [`GR00T_PIPELINE_GUIDE.md`](GR00T_PIPELINE_GUIDE.md) — 수집 → GR00T 변환(60→20fps) → stats → 학습 → 추론 end-to-end. video.delta_indices=[-20,0] / ACTION_HORIZON=40 / allow_padding 운영 가이드 포함
+- [`GR00T_N17_deploy_analysis.md`](GR00T_N17_deploy_analysis.md) — N1.7 Gr00tPolicy 정합 분석 (배포 측 변경 근거)
+- [`DP_PIPELINE_CHECKLIST.md`](DP_PIPELINE_CHECKLIST.md) — Diffusion Policy 수집/변환/학습/배포 운영 체크리스트
 - [`docs/HARDWARE.md`](docs/HARDWARE.md) — Quest3 / G1 / DEX3 / Inspire / DXL / ZED / RealSense IDL·msg·Hz·latency, SDK 사실 검증 (444줄)
 - [`docs/QUEST3_SETUP.md`](docs/QUEST3_SETUP.md) — Linux USB 연결 가이드 (adb, udev, dev mode)
 - [`docs/DEPLOY_PRO4000.md`](docs/DEPLOY_PRO4000.md) — pro4000 배포 + Quest3-only 검증 절차

@@ -38,6 +38,13 @@ from sharedmemory.shm_schema import (
 from utils.modality_layout import build_state_layout, layout_from_modality_json
 
 import logging_mp
+# logging_mp 호환 shim: 일부 PyPI 빌드(0.2.1)는 snake_case 별칭 get_logger/basic_config
+# 가 없고 getLogger/basicConfig 만 제공한다. G1 코드는 get_logger 를 쓰므로, 설치된
+# 빌드에 별칭이 없으면 여기서 보강해 배포 import 가 깨지지 않게 한다.
+if not hasattr(logging_mp, "get_logger") and hasattr(logging_mp, "getLogger"):
+    logging_mp.get_logger = logging_mp.getLogger
+if not hasattr(logging_mp, "basic_config") and hasattr(logging_mp, "basicConfig"):
+    logging_mp.basic_config = logging_mp.basicConfig
 logger_mp = logging_mp.get_logger(__name__)
 
 

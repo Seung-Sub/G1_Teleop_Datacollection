@@ -15,8 +15,9 @@ G1_Teleoperation/
 ├── setup.py                   pip install -e . 진입
 ├── README.md                  본 워크스페이스 통합 가이드
 ├── Project_tree.md            (이 파일)
-├── GR00T_PIPELINE_GUIDE.md    수집 → GR00T 변환(60→20fps) → stats → 학습 → 추론 end-to-end 절차
+├── GR00T_PIPELINE_GUIDE.md    수집 → GR00T 변환(60→20fps) → stats → 학습 → 추론 end-to-end 절차 (Phase A~D: video.delta_indices=[-20,0] / ACTION_HORIZON=40 / --allow-padding / episode 최소 10초 권장)
 ├── GR00T_N17_deploy_analysis.md  N1.7 Gr00tPolicy 정합 분석 (배포 측 변경 근거)
+├── DP_PIPELINE_CHECKLIST.md   Diffusion Policy 수집/변환/학습/배포 운영 체크리스트 (사전 검증 완료 항목 명시)
 ├── check_dex3_recv.py         DEX3 state DDS 수신 단독 진단 (main.py 끄고)
 ├── check_dex3_state.py        DEX3 state 추가 단독 진단
 ├── check_dex3_grasp.py        DEX3 grasp 추가 단독 진단
@@ -50,8 +51,8 @@ G1_Teleoperation/
 │   ├── worker_zed.py          ZED stereo direct(USB)/stream + ArUco + depth + workspace mask (Phase F serial 인자)
 │   ├── worker_camera.py       RealSense color 60fps 640x360 (D435i/455/405). serial 별 인스턴스 → role-based CAMERA_VIEW SHM (Phase K7 멀티)
 │   ├── worker_record.py       FSM 외부 20Hz + RecordCollectors thread + align_and_save_episode (Phase D 78% rewrite). 멀티 카메라 / DEX3 7×2 / modality.json 토글 반영 (K~M)
-│   ├── worker_deploy_policy.py  N1.7 Gr00tPolicy slow(20Hz)/fast(60Hz) + cross-fade + lag-trim (Phase E + N1.7 refactor)
-│   ├── worker_deploy_dp.py    Diffusion Policy slow(10Hz)/fast(60Hz), n_obs_steps=2 deque, 평탄 obs dict
+│   ├── worker_deploy_policy.py  N1.7 Gr00tPolicy slow(20Hz)/fast(60Hz) + cross-fade + lag-trim. _CameraFrameRing + 60Hz camera poll thread (video.delta_indices=[-20,0] 학습-배포 정합, Phase B)
+│   ├── worker_deploy_dp.py    Diffusion Policy slow(10Hz)/fast(60Hz), n_obs_steps=2 deque, 평탄 obs dict. logging_mp 호환 shim (PyPI 0.2.1 별칭 누락 대응)
 │   ├── worker_plot.py         matplotlib realtime qpos/action plot (50Hz)
 │   ├── worker_g1_visualization.py  Meshcat 시각화 (현재 main.py 미사용 — 옵션)
 │   ├── keyboard_listener.py   q=shutdown, h=go_home
@@ -165,7 +166,10 @@ G1_Teleoperation/
 | **STEP 2~6 bringup** | `6dab495`~`15fc35f` | NIC 갱신, cameras.yaml D405×2, QUEST3 jammy adb, cv2↔PyQt5 Qt 충돌 해결, preflight cleanup + ego mask 가드 |
 | **60Hz pipeline** | `78486d0` | 전 파이프라인 60Hz 정렬축 통일 (camera 60fps + IK/제어/VR 60Hz + record axis 60Hz). 360 해상도 (16:9 native) |
 | **Robustness + replay layout + SET-task** | `31a0b60` | mat_tool NaN guard, IK NaN guard(last_good fallback), vuer session-close silent. replay 가 modality.json 으로 동적 layout 복원. SET 버튼이 코드 재실행 없이 task 전환 |
-| **GR00T N1.7 deploy + DP deploy + 변환 유틸** | (다음 커밋) | evaluate.py N1.7 시그니처 정합 (Gr00tPolicy embodiment_tag + model_path + device only). evaluate_dp.py + worker_deploy_dp.py 신설. convert_to_gr00t + verify 유틸. .gitignore 정리(.claude/, *.zarr, record_gr00t/, *.zip) |
+| **GR00T N1.7 deploy + DP deploy + 변환 유틸** | `37b5f24` | evaluate.py N1.7 시그니처 정합 (Gr00tPolicy embodiment_tag + model_path + device only). evaluate_dp.py + worker_deploy_dp.py 신설. convert_to_gr00t + verify 유틸. .gitignore 정리(.claude/, *.zarr, record_gr00t/, *.zip) |
+| **Phase B video history** | (다음 커밋) | worker_deploy_policy.py 에 _CameraFrameRing + 60Hz camera poll thread + ts-based pick. 학습 video.delta_indices=[-20,0] (1초 전 frame) 과 deploy 정합 |
+| **Replay 안전 + 자동 home recovery** | (다음 커밋) | worker_g1_ik/hand_ctrl: 존재하지 않는 ep parquet 미존재/로드 실패 시 워커 크래시 → replay 클리어 후 복귀로 방어. replay-done 시 set_start 유지 + home=True 트리거로 ready-pose cosine recovery 자동 진입 (사용자 Start 재클릭 불필요) |
+| **DP 운영 체크리스트 + logging_mp shim** | (다음 커밋) | DP_PIPELINE_CHECKLIST.md 신설. worker_deploy_dp.py 에 logging_mp 별칭 보강 (PyPI 0.2.1 누락 빌드 대응) |
 
 상세는 [`README.md`](README.md), [`docs/HARDWARE.md`](docs/HARDWARE.md),
 [`docs/INSTALL.md`](docs/INSTALL.md).
