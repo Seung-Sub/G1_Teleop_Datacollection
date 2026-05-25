@@ -106,8 +106,11 @@ DEPTH_MAP = [
 # 슬롯) 를 사용할 수 있게 left/right 두 frame 슬롯 유지.
 CAMERA_VIEW = [
     # color frame 두 슬롯: RealSense 는 left 만 사용 (mono), ZED 는 left/right.
-    ("frame_left",  (480, 640, 3), np.uint8),
-    ("frame_right", (480, 640, 3), np.uint8),
+    # 해상도 640x360 (16:9). RealSense D405/D455 가 640x360@60fps color 로 직접 캡처,
+    # ZED 는 worker_zed 가 원본을 640x360 으로 cv2.resize (둘 다 16:9 native 종횡비).
+    # (이전 480 → 360 변경: 카메라 60fps 전환 + ZED native 종횡비 정합.)
+    ("frame_left",  (360, 640, 3), np.uint8),
+    ("frame_right", (360, 640, 3), np.uint8),
     # frame 캡처 시각 (host perf_counter_ns — RealSense 는 Global Time 변환값,
     # ZED 는 direct grab 시각).
     ("frame_ts",    (),            np.int64),
@@ -188,6 +191,7 @@ RECORD_MODE_LAYOUT = [
     ("replay",         (),    np.bool_),
     ("home",          (),    np.bool_),
     ("deploy",          (),    np.bool_),
+    ("set_task",       (),    np.bool_),   # SET 버튼 → task 재설정 신호 (코드 재실행 없이 task 전환)
 ]
 
 MASK_CONTROL_LAYOUT = [

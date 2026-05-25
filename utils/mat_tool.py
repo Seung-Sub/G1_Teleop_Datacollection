@@ -1,10 +1,17 @@
 import numpy as np
 
 def mat_update(prev_mat, mat):
-    if np.linalg.det(mat) == 0:
-        return prev_mat, False # Return previous matrix and False flag if the new matrix is non-singular (determinant ≠ 0).
-    else:
-        return mat, True
+    # NaN/inf guard (최우선): VR 연결 끊김/패킷 손실 시 vuer pose 에 NaN 이 들어올 수
+    # 있다. 옛 코드는 `np.linalg.det(mat) == 0` 만 검사했는데, det(NaN)=NaN 이고
+    # NaN==0 은 False 라 NaN 행렬이 그대로 통과 → IK(CasADi) 로 가서
+    # "NaN detected for grad_f_x" + action 오염. finite 검사를 먼저 한다.
+    if not np.all(np.isfinite(mat)):
+        return prev_mat, False
+    det = np.linalg.det(mat)
+    # det 이 finite 가 아니거나(위에서 걸러지지만 방어) 0 에 가까우면(특이행렬) prev 유지.
+    if not np.isfinite(det) or np.isclose(det, 0.0, atol=1e-6):
+        return prev_mat, False
+    return mat, True
 
 
 def fast_mat_inv(mat):

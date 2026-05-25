@@ -6,6 +6,7 @@ from scipy.spatial.transform import Rotation as R
 from utils.state import State, EventsSnapshot, next_state
 from utils.rate import Rate
 from utils.mat_tool import fast_mat_inv, cosine_ease, se3_interp
+from utils.modality_layout import layout_from_modality_json, split_state_vec
 
 from sharedmemory.shmManager import SharedMemoryManager
 from sharedmemory.shm_schema import (
@@ -90,8 +91,10 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand", waist_mod
     robot_obs_shm        = SharedMemoryManager(ROBOT_OBS,              shared_lock["robot_obs_lock"],        shm_name["robot_obs_shm"])
     quest_controller_shm = SharedMemoryManager(QUEST_CONTROLLER,       shared_lock["quest_controller_lock"], shm_name["quest_controller_shm"])
 
-    # 50Hz 주기로 실행 
-    rate = Rate(50.0)
+    # 60Hz 주기로 실행 (50→60: 저장 정렬축 60Hz 와 일치시켜 action 업샘플 제거.
+    # IK solve 측정 avg~3.2ms/max~3.6ms 라 60Hz(16.7ms 예산) 여유 충분. VR 소스
+    # 60fps 와도 매칭. recovery(3s)는 perf_counter 경과시간 기반이라 hz 무관.)
+    rate = Rate(60.0)
 
     # G1/Hand 컨트롤러를 아직 생성하지 않은 상태를 추적하는 플래그
     g1_initialized   = False
@@ -129,6 +132,13 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand", waist_mod
     waist_anchor_head = None
     waist_anchor_q    = None
     target_waist_q    = None
+    # IK 결과 NaN guard: solve_ik 가 (VR pose NaN / 솔버 실패 시) NaN sol_q 를 낼 수
+    # 있다. NaN action 이 robot_action_shm + parquet 에 저장되면 데이터가 오염되므로,
+    # 마지막 *정상(finite)* sol_q/sol_tauff 를 보관했다가 NaN 발생 시 그대로 유지한다.
+    # (로봇도 NaN 명령 대신 직전 자세 유지 → 안전.) mat_update 의 finite guard 가 1차
+    # 방어, 이게 2차 방어선.
+    _last_good_sol_q     = None
+    _last_good_sol_tauff = None
     # Head-yaw 정렬 (개선안 ①): grip engage 시점의 HMD yaw 를 1회 캡처해
     # 컨트롤러 변위/회전을 "사용자 정면 = 로봇 정면" 으로 정렬한다. 이로써 사용자가
     # 어느 방향으로 서서 VR 세션을 시작했든(=VR world frame 이 어디로 회전됐든)
@@ -161,6 +171,22 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand", waist_mod
             )
         except Exception:
             pass
+
+    def _guard_sol(sol_q, sol_tauff):
+        """IK 결과가 finite 면 last_good 갱신 후 반환, NaN/inf 면 last_good 으로 대체.
+        last_good 도 없으면(에피소드 첫 NaN) None 반환 → 호출부에서 write skip."""
+        nonlocal _last_good_sol_q, _last_good_sol_tauff
+        if sol_q is not None and np.all(np.isfinite(sol_q)) and \
+           sol_tauff is not None and np.all(np.isfinite(sol_tauff)):
+            _last_good_sol_q     = np.asarray(sol_q).copy()
+            _last_good_sol_tauff = np.asarray(sol_tauff).copy()
+            return sol_q, sol_tauff, True
+        # NaN/inf — 직전 정상값 유지 (로봇/데이터 보호)
+        if _last_good_sol_q is not None:
+            logger_mp.warning("[G1_IK] solve_ik 결과 NaN/inf — 직전 정상 sol 유지 (action 오염 방지).")
+            return _last_good_sol_q, _last_good_sol_tauff, False
+        logger_mp.warning("[G1_IK] solve_ik 결과 NaN/inf 이고 last_good 없음 — 이 cycle write skip.")
+        return None, None, False
 
     first_loop = True
 
@@ -273,13 +299,16 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand", waist_mod
                             _ik_cycle_count += 1
                             if _ik_cycle_count % _ik_publish_every == 0:
                                 _publish_ik_stats(_ik_solve_ms_window)
-                            robot_action_shm.write_data(
-                                action_waist     =target_waist_q,
-                                action_waist_tauff=np.zeros(3),
-                                action_head      =HEAD_READY_RAD,
-                                action_arm       =sol_q[5:],
-                                action_arm_tauff =sol_tauff[5:],
-                            )
+                            sol_q, sol_tauff, _ok = _guard_sol(sol_q, sol_tauff)  # NaN guard
+                            if sol_q is not None:
+                                robot_action_shm.write_data(
+                                    action_body_ts   =np.int64(time.perf_counter_ns()),
+                                    action_waist     =target_waist_q,
+                                    action_waist_tauff=np.zeros(3),
+                                    action_head      =HEAD_READY_RAD,
+                                    action_arm       =sol_q[5:],
+                                    action_arm_tauff =sol_tauff[5:],
+                                )
 
                             if alpha >= 1.0:
                                 # ease 종료 — anchor 전체 reset + home flag clear
@@ -428,17 +457,21 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand", waist_mod
                         if _ik_cycle_count % _ik_publish_every == 0:
                             _publish_ik_stats(_ik_solve_ms_window)
 
+                        # NaN guard: 결과가 NaN/inf 면 직전 정상 sol 유지 (action 오염 방지).
+                        sol_q, sol_tauff, _ok = _guard_sol(sol_q, sol_tauff)
+
                         # waist 는 우리가 직접 명령(IK 결과 sol_q[:3] 무시),
                         # head 도 init 고정(0)이므로 IK 결과 대신 0 사용해도 무방하지만
                         # IK 가 head dof 를 안 건드린다는 보장이 없으므로 그대로 두면 0 근처 유지.
-                        robot_action_shm.write_data(
-                            action_body_ts   =np.int64(time.perf_counter_ns()),
-                            action_waist     =target_waist_q,
-                            action_waist_tauff=np.zeros(3),
-                            action_head      =HEAD_READY_RAD,               # controller 모드: 머리는 ready-pose([2048,1934])로 고정
-                            action_arm       =sol_q[5:],
-                            action_arm_tauff =sol_tauff[5:],
-                        )
+                        if sol_q is not None:
+                            robot_action_shm.write_data(
+                                action_body_ts   =np.int64(time.perf_counter_ns()),
+                                action_waist     =target_waist_q,
+                                action_waist_tauff=np.zeros(3),
+                                action_head      =HEAD_READY_RAD,               # controller 모드: 머리는 ready-pose([2048,1934])로 고정
+                                action_arm       =sol_q[5:],
+                                action_arm_tauff =sol_tauff[5:],
+                            )
 
                     # ===========================================================
                     # vr_input == "hand": 기존 home-rebase + 절대좌표 fallback
@@ -505,14 +538,16 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand", waist_mod
                             if _ik_cycle_count % _ik_publish_every == 0:
                                 _publish_ik_stats(_ik_solve_ms_window)
 
-                        robot_action_shm.write_data(
-                            action_body_ts   =np.int64(time.perf_counter_ns()),
-                            action_waist     =sol_q[:3],
-                            action_waist_tauff=sol_tauff[:3],
-                            action_head      =sol_q[3:5],
-                            action_arm       =sol_q[5:],
-                            action_arm_tauff =sol_tauff[5:],
-                        )
+                        sol_q, sol_tauff, _ok = _guard_sol(sol_q, sol_tauff)  # NaN guard
+                        if sol_q is not None:
+                            robot_action_shm.write_data(
+                                action_body_ts   =np.int64(time.perf_counter_ns()),
+                                action_waist     =sol_q[:3],
+                                action_waist_tauff=sol_tauff[:3],
+                                action_head      =sol_q[3:5],
+                                action_arm       =sol_q[5:],
+                                action_arm_tauff =sol_tauff[5:],
+                            )
 
                 if replay and not replay_demo_init :
                     logger_mp.info(f"[replay init]")
@@ -536,7 +571,55 @@ def worker_g1_ik(shared_event, shm_name, shared_lock, vr_input="hand", waist_mod
                     replay_actions   = np.stack(df["action"].to_numpy()).astype(np.float64)
                     replay_length    = replay_actions.shape[0]
 
-                    replay_g1_data = replay_actions[:, :19]   # (N,19) = waist3 + head2 + arm14
+                    # ---- 동적 layout 파싱 (수집 인자 무관 자동 대응) ----------------
+                    # 저장 측(record_collectors)은 modality_layout.build_state_layout 순서로
+                    # action_vec 을 concat 한다. 그 결과가 meta/modality.json 에 그대로 기록됨.
+                    # → replay 도 *같은 modality.json* 을 읽어 layout 을 복원하면 어떤 토글
+                    #   (waist/head on·off, dex3/inspire) 이든 정확히 분해된다. 하드코딩 X.
+                    modality_path = os.path.join("record", task_name, "meta", "modality.json")
+                    replay_layout = None
+                    try:
+                        import json as _json
+                        with open(modality_path, "r") as _f:
+                            _m = _json.load(_f)
+                        replay_layout = layout_from_modality_json(_m)
+                        logger_mp.info(f"[REPLAY INIT] layout from modality.json: {replay_layout}")
+                    except Exception as e:
+                        logger_mp.warning(
+                            f"[REPLAY INIT] modality.json 로드 실패({e}). "
+                            f"19D(waist3+head2+arm14) 고정 fallback 사용."
+                        )
+
+                    # body action (waist3 + head2 + arm14 = 19D) 을 layout 기반으로 재구성.
+                    # waist/head 가 off 인 데이터면 그 부분은 0 으로 채운다(로봇은 해당 관절을
+                    # 별도 제어/고정하므로 0 action 이 안전한 중립값).
+                    if replay_layout is not None:
+                        names = [nm for nm, _ in replay_layout]
+                        replay_body_waist = np.zeros((replay_length, 3), dtype=np.float64)
+                        replay_body_head  = np.zeros((replay_length, 2), dtype=np.float64)
+                        replay_body_larm  = None
+                        replay_body_rarm  = None
+                        for k in range(replay_length):
+                            parts = split_state_vec(replay_actions[k], replay_layout)
+                            if k == 0:
+                                # left_arm/right_arm 은 항상 존재(layout 규칙). 차원 확인.
+                                la_dim = parts['left_arm'].size
+                                ra_dim = parts['right_arm'].size
+                                replay_body_larm = np.zeros((replay_length, la_dim))
+                                replay_body_rarm = np.zeros((replay_length, ra_dim))
+                            if 'waist' in parts: replay_body_waist[k] = parts['waist']
+                            if 'head'  in parts: replay_body_head[k]  = parts['head']
+                            replay_body_larm[k] = parts['left_arm']
+                            replay_body_rarm[k] = parts['right_arm']
+                        # arm14 = left_arm(7) + right_arm(7)
+                        replay_body_arm = np.concatenate([replay_body_larm, replay_body_rarm], axis=1)
+                        # g1 body action 19D = waist3 + head2 + arm14 (worker_g1_ctrl 가 받는 형식)
+                        replay_g1_data = np.concatenate(
+                            [replay_body_waist, replay_body_head, replay_body_arm], axis=1
+                        )
+                    else:
+                        # fallback: 옛 19D 고정 가정 (33D 레이아웃 데이터 호환)
+                        replay_g1_data = replay_actions[:, :19]
 
                     replay_demo_init = True
                     replay_frame_idx = 0

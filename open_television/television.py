@@ -271,36 +271,42 @@ class TeleVision:
             left_display_image  = cv2.cvtColor(left_raw,  cv2.COLOR_BGR2RGB)
             right_display_image = cv2.cvtColor(right_raw, cv2.COLOR_BGR2RGB)
             aspect_ratio = self.img_width / self.img_height
-            session.upsert(
-                [
-                    ImageBackground(
-                        left_display_image,
-                        aspect=1.778,
-                        height=1,
-                        distanceToCamera=1,
-                        # The underlying rendering engine supported a layer binary bitmask for both objects and the camera. 
-                        # Below we set the two image planes, left and right, to layers=1 and layers=2. 
-                        # Note that these two masks are associated with left eye’s camera and the right eye’s camera.
-                        layers=1,
-                        format="jpeg",
-                        quality=50,
-                        key="background-left",
-                        interpolate=True,
-                    ),
-                    ImageBackground(
-                        right_display_image,
-                        aspect=1.778,
-                        height=1,
-                        distanceToCamera=1,
-                        layers=2,
-                        format="jpeg",
-                        quality=50,
-                        key="background-right",
-                        interpolate=True,
-                    ),
-                ],
-                to="bgChildren",
-            )
+            try:
+                session.upsert(
+                    [
+                        ImageBackground(
+                            left_display_image,
+                            aspect=1.778,
+                            height=1,
+                            distanceToCamera=1,
+                            # The underlying rendering engine supported a layer binary bitmask for both objects and the camera. 
+                            # Below we set the two image planes, left and right, to layers=1 and layers=2. 
+                            # Note that these two masks are associated with left eye’s camera and the right eye’s camera.
+                            layers=1,
+                            format="jpeg",
+                            quality=50,
+                            key="background-left",
+                            interpolate=True,
+                        ),
+                        ImageBackground(
+                            right_display_image,
+                            aspect=1.778,
+                            height=1,
+                            distanceToCamera=1,
+                            layers=2,
+                            format="jpeg",
+                            quality=50,
+                            key="background-right",
+                            interpolate=True,
+                        ),
+                    ],
+                    to="bgChildren",
+                )
+            except (AssertionError, KeyError) as e:
+                # VR(WebXR) 세션이 끊기면 vuer 가 "Websocket session is missing" 을 던진다.
+                # teleop 종료/연결 끊김 시 정상 현상이므로 조용히 루프 종료 (스택트레이스 방지).
+                print(f"[TeleVision] VR session closed during upsert — image stream stop ({type(e).__name__}).")
+                return
             # 'jpeg' encoding should give you about 30fps with a 16ms wait in-between.
             await asyncio.sleep(0.016 * 2)
 
@@ -329,21 +335,25 @@ class TeleVision:
                 continue
             display_image = cv2.cvtColor(raw, cv2.COLOR_BGR2RGB)
 
-            session.upsert(
-                [
-                    ImageBackground(
-                        display_image,
-                        aspect=1.778,
-                        height=1,
-                        distanceToCamera=1,
-                        format="jpeg",
-                        quality=50,
-                        key="background-mono",
-                        interpolate=True,
-                    ),
-                ],
-                to="bgChildren",
-            )
+            try:
+                session.upsert(
+                    [
+                        ImageBackground(
+                            display_image,
+                            aspect=1.778,
+                            height=1,
+                            distanceToCamera=1,
+                            format="jpeg",
+                            quality=50,
+                            key="background-mono",
+                            interpolate=True,
+                        ),
+                    ],
+                    to="bgChildren",
+                )
+            except (AssertionError, KeyError) as e:
+                print(f"[TeleVision] VR session closed during upsert (mono) — stream stop ({type(e).__name__}).")
+                return
             await asyncio.sleep(0.016)
 
     @property

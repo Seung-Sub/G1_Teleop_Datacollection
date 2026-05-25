@@ -216,6 +216,21 @@ def worker_record(shared_event, shm_name, shared_lock):
                 state = State.IDLE
                 continue
 
+            # SET 버튼 → task 재설정 (코드 재실행 없이 task 전환) -----------------
+            # 어느 상태(IDLE/RECORDING)에서든 set_task=True 감지 시:
+            #   진행 중 수집 폐기 → WAIT_FOR_SET 로 되돌림 → 아래 WAIT_FOR_SET 블록이
+            #   새 task_name 을 읽어 ep_idx 재계산 후 IDLE 전환.
+            # 최초 SET(WAIT_FOR_SET 상태)에서도 동일하게 동작 (플래그만 클리어).
+            if bool(mode_raw["set_task"]):
+                record_mode_shm.write_data(set_task=False)
+                if state is State.RECORDING:
+                    _stop_collectors_discard()
+                    logger_mp.info("[Record] SET pressed during RECORDING → 진행 중 에피소드 폐기.")
+                state = State.WAIT_FOR_SET
+                logger_mp.info("[Record] SET 감지 → task 재설정 (state=WAIT_FOR_SET)")
+                # fall-through 하지 않고 다음 tick 에서 WAIT_FOR_SET 처리
+                continue
+
             # WAIT_FOR_SET ----------------------------------------------
             if state is State.WAIT_FOR_SET:
                 task_name = task_data["task_name"].item().strip()

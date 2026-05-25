@@ -666,7 +666,7 @@ class TeleopUI(QtWidgets.QMainWindow):
             shared_event['set_hand'].set()
 
     def func_vr(self):
-        logger_mp.info(f"func_vr")
+        logger_mp.info("[VR] VR connect 버튼 눌림 — adb reverse tcp:8012 실행 시도...")
         try:
             result = subprocess.run(
                 ["adb", "reverse", "tcp:8012", "tcp:8012"],
@@ -675,13 +675,28 @@ class TeleopUI(QtWidgets.QMainWindow):
                 stderr=subprocess.PIPE,
                 text=True
             )
-            logger_mp.info("ADB reverse command executed successfully")
-            logger_mp.info(result.stdout)
+            logger_mp.info("[VR] ✅ VR 연결 성공 — adb reverse tcp:8012 OK. "
+                           "이제 Quest3 브라우저에서 vuer 접속 가능.")
+            if result.stdout.strip():
+                logger_mp.info(f"[VR] adb stdout: {result.stdout.strip()}")
+            # GUI record_info 창에도 표시 (있으면).
+            try:
+                self.record_info.append("[VR] ✅ VR 연결됨 (adb reverse OK)")
+            except Exception:
+                pass
         except FileNotFoundError:
-            logger_mp.info("ADB command not found. Ensure that adb is installed and in your PATH.")
+            logger_mp.error("[VR] ❌ adb 명령을 찾을 수 없음. adb 설치 + PATH 확인 필요.")
+            try:
+                self.record_info.append("[VR] ❌ adb 없음 — 설치 필요")
+            except Exception:
+                pass
         except subprocess.CalledProcessError as e:
-            logger_mp.info("Failed to execute adb reverse command:")
-            logger_mp.info(e.stderr)
+            logger_mp.error(f"[VR] ❌ adb reverse 실패 — Quest3 USB 연결/인식 확인 필요. "
+                            f"stderr: {e.stderr.strip() if e.stderr else '(없음)'}")
+            try:
+                self.record_info.append("[VR] ❌ VR 연결 실패 (adb reverse) — USB 확인")
+            except Exception:
+                pass
 
 
     def func_emergency(self,shared_event):
@@ -732,7 +747,8 @@ class TeleopUI(QtWidgets.QMainWindow):
                 reset        = np.bool_(False),
                 replay       = np.bool_(False),
                 done         = np.bool_(False),
-                deploy       = np.bool_(False) 
+                deploy       = np.bool_(False),
+                set_task     = np.bool_(True),   # worker_record 가 어느 상태에서든 task 재설정하도록 신호
             )
             self.record_info.setPlainText(f"[INFO] Task: {task_text}\n"
                                           f"[INFO] num_episodes = {num_eps}, episode_len = {ep_len}(s)\n"

@@ -4,6 +4,7 @@ import numpy as np
 
 from utils.state import State, EventsSnapshot, next_state
 from utils.rate import Rate
+from utils.modality_layout import layout_from_modality_json, split_state_vec
 
 # hand 컨트롤러는 hand 인자에 따라 lazy import — DEX3 는 unitree_hg DDS msg
 # 모듈을 필요로 하므로 Inspire 만 쓰는 환경에서도 import 가 깨지지 않게.
@@ -46,7 +47,12 @@ def worker_hand_ctrl(shared_event, shm_name, shared_lock,
     robot_action_shm = SharedMemoryManager(ROBOT_ACTION, shared_lock["robot_action_lock"], shm_name["robot_action_shm"])
     robot_obs_shm = SharedMemoryManager(ROBOT_OBS, shared_lock["robot_obs_lock"], shm_name["robot_obs_shm"])   
 
-    rate = Rate(50.0)
+    # 50→100Hz: DEX3 통신은 1000Hz(스펙) + worker_hand_dds 도 1000Hz 로 이미 충분.
+    # 50Hz 는 하드웨어 한계가 아니라 이 Rate 소프트 제한이었음. 100Hz 로 올리면 저장
+    # 정렬축(60Hz)에서 hand 가 업샘플 없이 자연스러운 다운샘플이 된다. 실제 달성 hz 는
+    # 실행 후 loop monitor 의 hand_freq(freq_shm.tick_hz) 로 확인 — 100 유지 안 되면 루프
+    # 내 다른 작업이 병목이므로 그땐 50 으로 되돌릴 것.
+    rate = Rate(100.0)
 
     # G1/Hand 컨트롤러를 아직 생성하지 않은 상태를 추적하는 플래그
     hand_initialized = False
@@ -164,6 +170,13 @@ def worker_hand_ctrl(shared_event, shm_name, shared_lock,
                         robot_action_shm.write_data(action_hand=act14, action_hand_ts=np.int64(ts_act_hand))
 
 
+                # 동기화 가드: worker_g1_ik 가 재생 종료 시 record_mode.replay=False 로
+                # 만드는데, 만약 hand 가 자체 종료 조건에 도달하기 전 replay 가 먼저 꺼지면
+                # replay_demo_init 이 True 로 남아 다음 replay 가 init 을 건너뛴다. replay 가
+                # False 인데 init 이 True 면 여기서 리셋해 다음 replay 를 보장한다.
+                if (not replay) and replay_demo_init:
+                    replay_demo_init = False
+
                 if replay and not replay_demo_init :
                     replay_idx = int(record_episode_shm.read_data()["replay_idx"].item())
                     task_name = record_task_shm.read_data()["task_name"].item().strip()
@@ -185,9 +198,41 @@ def worker_hand_ctrl(shared_event, shm_name, shared_lock,
                     #    - observation/state도 필요하면 같은 식으로 df["observation.state"]
                     replay_actions   = np.stack(df["action"].to_numpy()).astype(np.float64)
                     replay_length    = replay_actions.shape[0]
-                    # 6) 핸드 데이터만 분리 (뒤 12개)
-                    #    replay_actions shape = (N, 19 + 12)
-                    replay_hand_data = replay_actions[:, 19:]   # (N,12)
+
+                    # ---- 동적 layout 파싱 (수집 인자 무관 자동 대응) ----------------
+                    # 저장 측은 modality_layout 순서(... left_hand, right_hand)로 action_vec
+                    # 을 concat 하고 그 결과를 meta/modality.json 에 기록. replay 는 같은
+                    # modality.json 을 읽어 left_hand/right_hand 를 정확히 추출한다.
+                    # (옛 코드의 replay_actions[:, 19:] 고정 슬라이스는 33D 레이아웃 가정이라
+                    #  waist/head off(28D) 데이터에서 hand 를 잘못 잘랐음 → 동적 파싱으로 교체.)
+                    modality_path = os.path.join("record", task_name, "meta", "modality.json")
+                    replay_layout = None
+                    try:
+                        import json as _json
+                        with open(modality_path, "r") as _f:
+                            _m = _json.load(_f)
+                        replay_layout = layout_from_modality_json(_m)
+                        logger_mp.info(f"[REPLAY INIT] hand layout from modality.json: {replay_layout}")
+                    except Exception as e:
+                        logger_mp.warning(
+                            f"[REPLAY INIT] modality.json 로드 실패({e}). "
+                            f"action[:,19:] 고정 fallback 사용."
+                        )
+
+                    if replay_layout is not None:
+                        # left_hand / right_hand 를 layout 으로 분해해 [left|right] 로 결합.
+                        # hand_vec = left_hand(hd) + right_hand(hd). 아래 split 이 :hd / hd: 로 사용.
+                        lh_list, rh_list = [], []
+                        for k in range(replay_length):
+                            parts = split_state_vec(replay_actions[k], replay_layout)
+                            lh_list.append(parts['left_hand'])
+                            rh_list.append(parts['right_hand'])
+                        replay_hand_data = np.concatenate(
+                            [np.stack(lh_list), np.stack(rh_list)], axis=1
+                        )   # (N, 2*hd)
+                    else:
+                        # fallback: 옛 33D 가정
+                        replay_hand_data = replay_actions[:, 19:]
 
                     replay_demo_init = True
                     replay_frame_idx = 0
@@ -243,6 +288,16 @@ def worker_hand_ctrl(shared_event, shm_name, shared_lock,
                     # 프레임 전진은 위의 타이머/타임스탬프 분기에서만 수행.
                     # (과거 코드에 있던 unconditional `replay_frame_idx += 1` 은 body(worker_g1_ik)
                     #  20Hz vs hand 50Hz 비동기 버그의 원인이라 제거.)
+
+                    # 재생 종료 처리: 마지막 프레임 도달 시 replay_demo_init 을 False 로
+                    # 되돌린다. 이게 없으면 *두 번째 replay* 때 `replay and not replay_demo_init`
+                    # 조건이 False(init True 유지)라 parquet 재로드를 건너뛰어 hand 가 재생되지
+                    # 않는다(arm 은 worker_g1_ik 가 리셋해서 정상). body(worker_g1_ik)와 동일하게
+                    # 종료 시 리셋해 다음 replay 가 깨끗하게 다시 init 되도록 한다.
+                    if replay_frame_idx >= replay_length - 1:
+                        if (_replay_rel_ts is None) or (now - _replay_start_wall >= _replay_rel_ts[-1]):
+                            replay_demo_init = False
+                            logger_mp.info("[REPLAY DONE][hand] Finished all frames — init reset.")
 
 
                 if deploy:
