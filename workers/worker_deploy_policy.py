@@ -324,6 +324,12 @@ class Gr00t_Inference:
         lag_log_every: int = 50,
         obs_ts_policy: str = 'min',             # Phase L2: 'min' (stale 기준) | 'max'
         modality_json_path: Optional[str] = None,  # Phase M4 (PART3 §2.5): 학습 데이터셋의 modality.json
+        chunking_mode: str = "legacy",          # {"legacy", "soft_rtc"} — soft_rtc = receding horizon + tail-continuation (backward-jump 방지)
+        exec_frac: float = 0.5,                 # soft_rtc: 버퍼의 이 비율만큼 소비 후 replan (receding horizon). ref=0.5
+        blend_curve: str = "exp",               # soft_rtc: tail↔새청크 blend 가중 곡선 {"exp","linear"} (LeRobot RTC prefix_attention_schedule 차용)
+        inference_mode: str = "pytorch",        # {"pytorch", "trt_full_pipeline"} — trt = Gr00tPolicy in-place 패치(setup_tensorrt_engines)
+        trt_engine_path: str = "",              # trt_full_pipeline 시 엔진 디렉토리 (vit_bf16.engine 등). 예: ~/Isaac-GR00T/gr00t_trt_deploy_20k/engines
+        trt_scripts_path: str = "/home/kist/Isaac-GR00T/scripts/deployment",  # trt_model_forward.py 위치 (sys.path 추가용)
     ):
         assert mode in ("gr00t_rs_multi", "gr00t_zed", "gr00t"), f"unsupported mode: {mode}"
         # 'gr00t' (legacy single RealSense) 는 alias for gr00t_rs_multi (ego only).
@@ -331,6 +337,9 @@ class Gr00t_Inference:
             mode = "gr00t_rs_multi"
         assert action_method in ("base", "maf", "tem"), f"unknown method: {action_method}"
         assert obs_ts_policy in ("min", "max"), f"unknown obs_ts_policy: {obs_ts_policy}"
+        assert chunking_mode in ("legacy", "soft_rtc"), f"unknown chunking_mode: {chunking_mode}"
+        assert blend_curve in ("exp", "linear"), f"unknown blend_curve: {blend_curve}"
+        assert inference_mode in ("pytorch", "trt_full_pipeline"), f"unknown inference_mode: {inference_mode}"
 
         self.shared_event = shared_event
         self.mode         = mode
@@ -351,6 +360,14 @@ class Gr00t_Inference:
         self.lag_log_every   = max(1, int(lag_log_every))
         self.obs_ts_policy   = obs_ts_policy
         self.modality_json_path = modality_json_path
+        self.chunking_mode   = chunking_mode
+        self.exec_frac       = float(exec_frac)
+        self.blend_curve     = blend_curve
+        self.inference_mode  = inference_mode
+        self.trt_engine_path = trt_engine_path
+        self.trt_scripts_path = trt_scripts_path
+        self._rtc_threshold  = 0      # soft_rtc: primary_index 가 이 값 이상이면 replan (첫 tick=0 이라 즉시 추론)
+        self._rtc_count      = 0
         self._lag_chunk_count = 0
         self._lag_ns_acc      = 0
         self._lag_ns_max      = 0
@@ -384,8 +401,12 @@ class Gr00t_Inference:
         # 해야 학습-배포 정합. 카메라 60fps SHM 갱신 (worker_camera.py) 을 polling
         # thread 가 모두 캡처해 ring 에 저장 → slow tick (20Hz) 시점에 ts 기반 pick.
         # 카메라 role 별 독립 ring (ego/wrist_l/wrist_r 또는 zed 모드의 ego_left/_right).
-        self._video_history_offset_ns: int = 1_000_000_000   # 1.0초 = -20 @ 20fps
+        self._video_history_offset_ns: int = 1_000_000_000   # 1.0초 = -20 @ 20fps (legacy 상수)
         self._video_history_tol_ns: int = 80_000_000          # 80ms pick tolerance
+        # video delta_indices: 정책 로딩 시 모델 config 로 갱신 → frame 구성 자동 적응
+        # (2-frame [-20,0] / 1-frame [0] 둘 다 한 코드로 호환). 기본값 = 2-frame.
+        self._video_deltas: List[int] = [-20, 0]
+        self._video_fps: float = 20.0      # 학습 데이터 다운샘플 fps (delta_indices 단위)
         self._cam_rings: Dict[str, _CameraFrameRing] = {
             role: _CameraFrameRing(capacity=120, role=role) for role in self.camera_roles
         }
@@ -403,6 +424,7 @@ class Gr00t_Inference:
         logger_mp.info(
             f"[Deploy] Gr00t_Inference started (mode={mode}, hand={self.hand_type}, "
             f"camera_roles={self.camera_roles}, action_method={action_method}, "
+            f"chunking_mode={self.chunking_mode}, exec_frac={self.exec_frac}, blend={self.blend_curve}, "
             f"slow={slow_hz}Hz, fast={fast_hz}Hz, obs_ts_policy={obs_ts_policy}, "
             f"video_history_offset={self._video_history_offset_ns/1e9:.2f}s, "
             f"ring_capacity=120 per camera)"
@@ -505,12 +527,52 @@ class Gr00t_Inference:
             embodiment_tag=self.embodiment_tag,
             device=self.device,
         )
+        # ★ TRT full pipeline: Gr00tPolicy 를 in-place 패치 (내부 모델→TRT 엔진). get_action 인터페이스 동일.
+        if self.inference_mode == "trt_full_pipeline":
+            try:
+                import sys as _sys
+                if self.trt_scripts_path not in _sys.path:
+                    _sys.path.insert(0, self.trt_scripts_path)
+                from trt_model_forward import setup_tensorrt_engines
+                setup_tensorrt_engines(self.policy, self.trt_engine_path, mode="n17_full_pipeline")
+                print(f"[Deploy] TRT engines 로드 완료: {self.trt_engine_path} (n17_full_pipeline)", flush=True)
+            except Exception as e:
+                logger_mp.exception(f"[Deploy] TRT setup 실패 → PyTorch fallback: {e}")
+                print(f"[Deploy] TRT setup 실패 → PyTorch 로 진행: {e}", flush=True)
+                self.inference_mode = "pytorch"
         # N1.7: language_key 는 체크포인트에서 자동 결정됨 (policy.language_key).
         # build_obs_dict 에 넘겨 학습-추론 language 키 정합 보장.
         self.language_key = getattr(self.policy, "language_key",
                                     "annotation.human.task_description")
+        # ★ 모델의 video delta_indices 읽어 deploy frame 구성 자동 적응 (1-frame/2-frame 호환)
+        try:
+            self._video_deltas = list(self.policy.modality_configs["video"].delta_indices)
+        except Exception as e:
+            logger_mp.warning(f"[Deploy] video delta_indices 읽기 실패: {e} — 기본 {self._video_deltas} 사용")
         logger_mp.info(f"[Deploy] Policy loaded (N1.7). embodiment={self.embodiment_tag} "
-                       f"language_key={self.language_key!r} task={task_name!r}")
+                       f"language_key={self.language_key!r} task={task_name!r} "
+                       f"video_deltas={self._video_deltas}({len(self._video_deltas)}frame)")
+        print(f"[Deploy] video_deltas={self._video_deltas} ({len(self._video_deltas)} frame)", flush=True)
+        # ★ warmup-on-load: 첫 추론 cold-start(CUDA 커널 컴파일) 제거 → #1 STALL위험 해소
+        try:
+            self._warmup_policy()
+        except Exception as e:
+            logger_mp.warning(f"[Deploy] warmup 실패(무시): {e}")
+
+    def _warmup_policy(self):
+        """정책 로딩 직후 dummy obs 로 get_action 1회 — CUDA 커널 warmup (첫 실추론 cold-start 제거)."""
+        H, W = 360, 640
+        T = max(1, len(self._video_deltas))
+        vk = list(self.policy.modality_configs["video"].modality_keys)
+        obs = {"video": {}, "state": {}, "language": {}}
+        for k in vk:
+            obs["video"][k] = np.zeros((1, T, H, W, 3), dtype=np.uint8)
+        for name, dim in self.layout:
+            obs["state"][name] = np.zeros((1, 1, dim), dtype=np.float32)
+        obs["language"][self.language_key] = [[self.task_name or "warmup"]]
+        t0 = time.perf_counter()
+        self.policy.get_action(obs)
+        print(f"[Deploy] policy warmup done ({(time.perf_counter()-t0)*1000:.0f}ms)", flush=True)
 
     # ----- observation -------------------------------------------------------
     def get_real_obs(self):
@@ -536,13 +598,13 @@ class Gr00t_Inference:
         except Exception:
             pass
 
-        # Phase B: 카메라 frame 들을 ring buffer 에서 가져와 (과거, 현재) 두 frame stack.
-        # 학습 video.delta_indices=[-20, 0] 와 동일 순서 [과거, 현재] 로 build.
-        # ring 은 별도 60Hz polling thread (_camera_poll_loop) 가 채움.
+        # 카메라 frame 을 ring 에서 가져와 모델의 video delta_indices 순서대로 stack.
+        # ★ self._video_deltas 기반 자동 적응: [-20,0]=2frame[과거,현재] / [0]=1frame[현재].
+        #   각 delta d 에 대해 target = now + d*(1/video_fps) 시점 frame pick (d=0 은 현재).
+        #   학습 extract_step_data 가 delta 순서대로 frame 로드하므로 동일 순서 보장.
         # ts 후보 (obs_ts_policy 용): body/hand + 각 카메라의 현재 frame ts.
         ts_candidates = [t for t in (ts_body, ts_hand) if t > 0]
         now_ns = time.perf_counter_ns()
-        target_past_ns = now_ns - self._video_history_offset_ns  # 1.0초 전
 
         frames: Dict[str, List[np.ndarray]] = {}
         # masking workspace mask (zed_mode 만 사용). 학습 시엔 mask 적용 X 가 일반적
@@ -577,19 +639,19 @@ class Gr00t_Inference:
             cur_ts, cur_frame = latest
             ts_candidates.append(cur_ts)
 
-            # 1초 전 frame pick. ring 에 1초 분량 안 차 있으면 (warmup) 현재 frame 복제.
-            # 학습 시 step_index<20 의 allow_padding clamp([-20,0]→[0,0]=동일 frame)
-            # 거동과 정확히 일치 → 학습-배포 정합.
-            past = ring.pick_at(target_past_ns, tol_ns=self._video_history_tol_ns)
-            if past is None:
-                past_frame = cur_frame  # warmup: 현재 복제
-            else:
-                _, past_frame = past
-
-            past_frame = _apply_ws_mask(role, past_frame)
-            cur_frame  = _apply_ws_mask(role, cur_frame)
-            # 순서 [과거, 현재] = video.delta_indices=[-20, 0] 와 일치.
-            frames[role] = [past_frame, cur_frame]
+            # video delta_indices 순서대로 frame 구성 (auto-adapt).
+            # d=0 → 현재 frame. d<0 → |d|/video_fps 초 전 frame (ring ts 기반 pick).
+            # ring 에 해당 과거 frame 없으면(warmup) 현재 복제 — 학습 allow_padding clamp 와 정합.
+            seq: List[np.ndarray] = []
+            for d in self._video_deltas:
+                if d == 0:
+                    fr = cur_frame
+                else:
+                    target_ns = now_ns + int(d * 1e9 / self._video_fps)   # d<0 → 과거
+                    picked = ring.pick_at(target_ns, tol_ns=self._video_history_tol_ns)
+                    fr = picked[1] if picked is not None else cur_frame   # warmup: 현재 복제
+                seq.append(_apply_ws_mask(role, fr))
+            frames[role] = seq   # delta_indices 순서 (1-frame=[현재], 2-frame=[과거,현재])
 
         if not frames:
             return None
@@ -660,13 +722,25 @@ class Gr00t_Inference:
             )
 
         # Cross-fade with tail of previous chunk.
-        if self._prev_actions is not None and self.primary_index < len(self._prev_actions):
-            remain_prev = self._prev_actions[self.primary_index:]
+        # primary_index / _prev_* 는 fast loop(60Hz)가 동시에 갱신하므로, race 로
+        # arm·hand 에 서로 다른 idx 가 적용돼 길이가 어긋나는 것(예: (91,1)vs(90,14)
+        # broadcast 실패)을 막기 위해 lock 안에서 일관된 스냅샷을 한 번에 읽는다.
+        with self._ctrl_lock:
+            idx       = self.primary_index
+            prev_arm  = self._prev_actions
+            prev_hand = self._prev_hand_actions
+        if prev_arm is not None and idx < len(prev_arm):
+            remain_prev = prev_arm[idx:]
             ovl = min(len(remain_prev), len(full_up))
             if ovl > 0:
                 alpha = np.linspace(0.0, 1.0, ovl)[:, None]
                 full_up[:ovl] = (1 - alpha) * remain_prev[:ovl] + alpha * full_up[:ovl]
-                hand_up[:ovl] = (1 - alpha) * self._prev_hand_actions[self.primary_index:][:ovl] + alpha * hand_up[:ovl]
+                # hand 는 자신의 길이로 ovl 재클램프 (arm 과 어긋나도 안전).
+                if prev_hand is not None:
+                    ovl_h = min(ovl, len(prev_hand) - idx, len(hand_up))
+                    if ovl_h > 0:
+                        a_h = alpha[:ovl_h]
+                        hand_up[:ovl_h] = (1 - a_h) * prev_hand[idx:idx + ovl_h] + a_h * hand_up[:ovl_h]
 
         with self._ctrl_lock:
             self._prev_actions      = self.primary_actions
@@ -677,6 +751,110 @@ class Gr00t_Inference:
             self._action_buf.clear()
             self._hand_buf.clear()
         self.start_loop = True
+
+    # ----- soft RTC (receding horizon + tail-continuation) ------------------
+    def _blend_alpha(self, n: int) -> np.ndarray:
+        """overlap 구간 blend 가중 0→1. exp=초반 tail 강하게 유지(프리즈)후 후반 새청크로.
+        (LeRobot RTC prefix_attention_schedule 의 아이디어를 attention 아닌 blend 가중으로 차용)."""
+        t = np.linspace(0.0, 1.0, n)
+        if self.blend_curve == "exp":
+            g = 3.0
+            a = (np.exp(g * t) - 1.0) / (np.exp(g) - 1.0)   # convex: 느린 시작(tail 유지) → 빠른 끝
+        else:
+            a = t
+        return a[:, None]
+
+    def do_slow_rtc(self):
+        """soft RTC: 버퍼를 exec_frac 만큼 소비한 뒤에만 replan (receding horizon).
+        그동안 fast loop 가 현재 청크의 *전진하는* 미실행 tail 을 계속 소비 →
+        index 0 리셋/매tick replan 이 만들던 stale-obs backward jump 를 구조적으로 제거."""
+        with self._ctrl_lock:
+            have = self.primary_actions is not None
+            idx  = self.primary_index
+            thr  = self._rtc_threshold
+        if have and idx < thr:
+            return  # 아직 replan 시점 아님 — 현재 청크 계속 소비
+        res = self.get_real_obs()
+        if res is None:
+            return
+        obs, obs_ts_ns = res
+        self._replan_rtc(obs, obs_ts_ns)
+
+    def _replan_rtc(self, obs: dict, obs_ts_ns: int):
+        """get_action → 측정 lag 로 native 청크 정렬(trim) → upsample → 현재 미실행 tail 과 blend → latch."""
+        if self.policy is None:
+            return
+        action, _info = self.policy.get_action(obs)
+        t_after_ns = time.perf_counter_ns()
+        first_key = "waist" if "waist" in action else "left_arm"
+        T = action[first_key].shape[1]
+        full = []; hand = []
+        for i in range(T):
+            a_np, h_np = action_to_array(action, i, self.hand_type, self.layout)
+            full.append(a_np); hand.append(h_np)
+        full = np.stack(full, axis=0); hand = np.stack(hand, axis=0)
+
+        # ── 입력↔출력 추적 (원인 좁히기): 처음 6회 + 매 lag_log_every
+        if self._rtc_count < 6 or (self._rtc_count % self.lag_log_every == 0):
+            try:
+                st = obs.get("state", {})
+                o_la = np.asarray(st["left_arm"])[0, 0]  if "left_arm"  in st else None
+                o_ra = np.asarray(st["right_arm"])[0, 0] if "right_arm" in st else None
+                msg = (f"[RTC-trace #{self._rtc_count}] T={T} "
+                       f"obs.L={np.round(o_la,3) if o_la is not None else None} "
+                       f"obs.R={np.round(o_ra,3) if o_ra is not None else None} | "
+                       f"act.L[0]={np.round(full[0,5:12],3)} act.L[-1]={np.round(full[-1,5:12],3)} | "
+                       f"act.R[0]={np.round(full[0,12:19],3)} act.R[-1]={np.round(full[-1,12:19],3)}")
+                if o_la is not None:
+                    msg += f" | act.L[0]-obs.L={np.round(full[0,5:12]-o_la,3)}(rel복원OK면~0)"
+                print(msg, flush=True)
+            except Exception as _e:
+                print(f"[RTC-trace] err: {_e}", flush=True)
+
+        # 보강1: 측정 lag(t_after-obs_ts)→native(20Hz) step 환산 후 그만큼 앞을 trim
+        #   (이미 경과한 prefix 제거 = 새 청크를 "지금"에 정렬). 업샘플 전 native 에서 적용(보강 timebase).
+        lag_ns = max(0, t_after_ns - obs_ts_ns)
+        lag_native = int(round(lag_ns * self.slow_hz / 1e9)) if self.lag_compensate else 0
+        lag_native = max(0, min(lag_native, T - 2))
+        full_n = full[lag_native:]; hand_n = hand[lag_native:]
+
+        full_up = upsample_actions(full_n, slow_hz=self.slow_hz, fast_hz=self.fast_hz, k=5)
+        hand_up = upsample_actions(hand_n, slow_hz=self.slow_hz, fast_hz=self.fast_hz, k=1)
+
+        # 현재 청크의 미실행 tail 과 blend (구조적 연속화). alpha=0 에서 tail → 명령 점프 0.
+        with self._ctrl_lock:
+            idx = self.primary_index
+            tail   = self.primary_actions[idx:].copy()      if self.primary_actions is not None else None
+            tail_h = self.primary_hand_actions[idx:].copy() if self.primary_hand_actions is not None else None
+        splice_l2 = 0.0
+        if tail is not None and len(tail) > 0 and len(full_up) > 0:
+            ovl = int(min(len(tail), len(full_up), len(tail_h), len(hand_up)))
+            if ovl > 0:
+                # 보강(splice 정렬): tail[0](현재 팔 명령) vs 새 청크 정렬 시작값. 0 에 가까워야 정렬 정확.
+                splice_l2 = float(np.linalg.norm(np.asarray(tail[0])[5:19] - np.asarray(full_up[0])[5:19]))
+                a = self._blend_alpha(ovl)
+                full_up[:ovl] = tail[:ovl]   * (1 - a) + full_up[:ovl] * a
+                hand_up[:ovl] = tail_h[:ovl] * (1 - a) + hand_up[:ovl] * a
+
+        with self._ctrl_lock:
+            self.primary_actions      = full_up
+            self.primary_hand_actions = hand_up
+            self.primary_index        = 0
+            self._rtc_threshold       = max(2, int(len(full_up) * self.exec_frac))
+            self._action_buf.clear(); self._hand_buf.clear()
+        self.start_loop = True
+
+        # 로깅 (보강: splice 정렬 + lag + stall margin). 처음 3회 + lag_log_every 마다.
+        self._rtc_count += 1
+        if self._rtc_count <= 3 or self._rtc_count % self.lag_log_every == 0:
+            lag_up = int(lag_native * self.fast_hz / self.slow_hz)
+            margin = len(full_up) - self._rtc_threshold
+            print(
+                f"[Deploy/RTC] #{self._rtc_count} lag={lag_ns/1e6:.0f}ms(native {lag_native}) "
+                f"buf={len(full_up)} replan_at={self._rtc_threshold} margin={margin} lag_up={lag_up} "
+                f"splice_L2={splice_l2:.4f}(0 에 가까울수록 정렬 정확)"
+                + ("  ⚠️STALL위험" if margin <= lag_up else ""), flush=True
+            )
 
     # ----- action post-processing -------------------------------------------
     def get_action(self):
@@ -826,7 +1004,10 @@ class Gr00t_Inference:
                         logger_mp.exception(f"[Deploy] policy init failed: {e}")
                         time.sleep(1.0); continue
                 try:
-                    self.do_slow()
+                    if self.chunking_mode == "soft_rtc":
+                        self.do_slow_rtc()
+                    else:
+                        self.do_slow()
                 except Exception as e:
                     logger_mp.exception(f"[Deploy] slow loop error: {e}")
             else:

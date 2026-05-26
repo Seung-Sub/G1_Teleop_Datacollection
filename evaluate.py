@@ -113,6 +113,23 @@ def _parse_args():
                    help="record/<task>/meta/modality.json 경로. 명시되면 layout 을 "
                         "이 파일에서 읽어 obs/action dict 구성 (학습=배포 자동 정합). "
                         "미명시 시 TELEOP_CONFIG SHM 의 토글로 build_state_layout 호출.")
+    # Soft RTC (receding horizon + tail-continuation) — backward-jump(issue #272) 방지
+    p.add_argument("--chunking-mode", dest="chunking_mode", choices=["legacy", "soft_rtc"],
+                   default="legacy",
+                   help="legacy = 기존(매 tick replan + lag-trim). soft_rtc = receding horizon "
+                        "+ 미실행 tail 연속화 + 측정 lag 정렬 (stale-obs backward jump 제거).")
+    p.add_argument("--exec-frac", dest="exec_frac", type=float, default=0.5,
+                   help="soft_rtc: 버퍼의 이 비율 소비 후 replan. 작을수록 반응성↑/추론부하↑ "
+                        "(단 (1-exec_frac)*buf > lag 여야 stall 없음). ref=0.5.")
+    p.add_argument("--blend-curve", dest="blend_curve", choices=["exp", "linear"], default="exp",
+                   help="soft_rtc: tail↔새청크 overlap blend 가중 곡선.")
+    # 추론 백엔드: pytorch(기본) vs TRT full pipeline (setup_tensorrt_engines in-place 패치)
+    p.add_argument("--inference-mode", dest="inference_mode",
+                   choices=["pytorch", "trt_full_pipeline"], default="pytorch",
+                   help="pytorch = Gr00tPolicy 그대로. trt_full_pipeline = TRT 엔진으로 가속 (get_action 동일).")
+    p.add_argument("--trt-engine-path", dest="trt_engine_path", default="",
+                   help="trt_full_pipeline 시 엔진 디렉토리 (vit_bf16.engine 등). "
+                        "예: /home/kist/Isaac-GR00T/gr00t_trt_deploy_20k/engines")
     return p.parse_args()
 
 
@@ -145,6 +162,11 @@ def main():
         lag_log_every =args.lag_log_every,
         obs_ts_policy =args.obs_ts_policy,
         modality_json_path=args.modality_json,
+        chunking_mode =args.chunking_mode,
+        exec_frac     =args.exec_frac,
+        blend_curve   =args.blend_curve,
+        inference_mode=args.inference_mode,
+        trt_engine_path=args.trt_engine_path,
     )
 
     print(f"[evaluate] Running. UI must set Deploy=True to start policy loading.")

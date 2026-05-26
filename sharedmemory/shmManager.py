@@ -48,6 +48,17 @@ class SharedMemoryManager:
                 self.shm = shared_memory.SharedMemory(name=self.name)
                 self._owner = False
 
+        if not self._owner:
+            # bpo-38119 우회: attach-only(non-owner) 프로세스가 종료될 때
+            # resource_tracker 가 owner 도 아닌 SHM 을 자동 unlink 하여 다른
+            # 프로세스(예: main.py)의 SHM 을 파괴하는 것을 방지한다. owner 만
+            # 추적/정리(main_unlink)하도록 non-owner 는 tracker 등록을 해제.
+            try:
+                from multiprocessing import resource_tracker
+                resource_tracker.unregister(self.shm._name, "shared_memory")
+            except Exception:
+                pass
+
     def write_data(self, **kwargs):
         with self.lock:
             # 바이트 단위로 각 필드만 덮어쓰기
