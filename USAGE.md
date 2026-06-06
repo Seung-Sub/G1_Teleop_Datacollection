@@ -46,6 +46,10 @@ python main.py [옵션]
 | `--gait-stick` | `split` | `{split, left, right}` | (loco+gait) stick 매핑 |
 | `--thumb-bend` | `0.5` | float 0..1 | Inspire 엄지 굽힘 (controller 모드) |
 | `--thumb-yaw` | `0.5` | float 0..1 | Inspire 엄지 yaw |
+| `--grasp-fingers` | `pinky,ring,middle,index` | comma subset | (Inspire controller) 파지 시 닫히는 손가락. 엄지는 항상 자세 지정 |
+| `--close-depth` | `1.0` | float 0..1 | (Inspire) 파지 깊이 (1.0=완전 폐쇄) |
+| `--grip-force` | `800` | int 0..1000 | (Inspire) force_set 파지력 상한(g). 도달 시 펌웨어 정지=과부하 차단 |
+| `--grip-speed` | `1000` | int 0..1000 | (Inspire) speed_set 속도 (1000=full≈800ms) |
 | `--no-robot` | False | flag | G1/hand 워커 생략 (Quest3+IK만 검증) |
 
 ### 1-2. 자주 쓰는 조합
@@ -55,10 +59,16 @@ python main.py [옵션]
 python main.py --hand dex3 --camera realsense --vr-input controller \
                --waist fixed --head off --lower-body hoist
 
-# Inspire 양손 + 동일 셋업
+# Inspire 양손 + 동일 셋업 (firm 파지: force 800, full speed, 4지 전부)
 python main.py --hand inspire --camera realsense --vr-input controller \
                --waist fixed --head off --lower-body hoist \
-               --thumb-bend 0.5 --thumb-yaw 0.5
+               --thumb-bend 0.5 --thumb-yaw 0.5 \
+               --grasp-fingers pinky,ring,middle,index --grip-force 800 --grip-speed 1000
+
+# Inspire — 엄지+검지+중지 핀치만, 부분 파지(60%)
+python main.py --hand inspire --camera realsense --vr-input controller \
+               --waist fixed --head off --lower-body hoist \
+               --grasp-fingers index,middle --close-depth 0.6 --thumb-bend 0.4 --thumb-yaw 0.5
 
 # loco 모드 (모션 모드 진입 후 — 리모컨 L2+B → L2+UP → R1+X)
 python main.py --hand dex3 --camera realsense --vr-input controller \

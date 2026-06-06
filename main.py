@@ -183,6 +183,19 @@ def parse_args():
                         help='Inspire thumb bend angle (controller mode only, 0..1)')
     parser.add_argument('--thumb-yaw',  dest='thumb_yaw',  type=float, default=0.5,
                         help='Inspire thumb yaw   angle (controller mode only, 0..1)')
+    # Inspire controller-mode 손가락 모드 / 파지 안전 (DEX3 는 무시)
+    parser.add_argument('--grasp-fingers', dest='grasp_fingers',
+                        default='pinky,ring,middle,index',
+                        help="(Inspire controller mode) 파지 시 닫히는 손가락 subset, comma 구분. "
+                             "선택: pinky,ring,middle,index. 엄지는 --thumb-bend/--thumb-yaw 로 "
+                             "항상 자세 지정. 예: --grasp-fingers index,middle")
+    parser.add_argument('--close-depth', dest='close_depth', type=float, default=1.0,
+                        help="(Inspire) 파지 깊이 0..1 (1.0=완전 폐쇄, 0.x=부분).")
+    parser.add_argument('--grip-force', dest='grip_force', type=int, default=800,
+                        help="(Inspire) DOF별 파지력 상한 force_set 0..1000(g). force_act 도달 시 "
+                             "펌웨어가 그 손가락 정지(STATUS=3)=과부하 차단. firm 파지+열 마진 기본 800.")
+    parser.add_argument('--grip-speed', dest='grip_speed', type=int, default=1000,
+                        help="(Inspire) DOF별 속도 speed_set 0..1000 (1000=full≈800ms). 기본 full.")
     # Phase F: G1/Hand 하드웨어 없이 Quest3 입력 + IK 계산만 검증
     parser.add_argument('--no-robot', dest='no_robot', action='store_true',
                         help='G1 / hand 워커 spawn 생략 + set_g1/set_hand 자동 set (Quest3 + IK 검증용)')
@@ -355,7 +368,8 @@ def get_worker_specs(args, events, locks, shm_names):
             from workers.worker_hand_dds  import worker_hand_r_dds, worker_hand_l_dds
             specs += [
                 {'target': worker_hand_ctrl,
-                 'args':   (events, shm_names, locks, args.hand, args.vr_input, args.thumb_bend, args.thumb_yaw, args.tactile),
+                 'args':   (events, shm_names, locks, args.hand, args.vr_input, args.thumb_bend, args.thumb_yaw, args.tactile,
+                            args.grasp_fingers, args.close_depth, args.grip_force, args.grip_speed),
                  'name':   'WORKER_HAND'},
                 # Inspire 전용 터치센서 Modbus DDS
                 {'target': worker_hand_r_dds, 'args': ('192.168.123.210', 'r', 'Right-hand process', shm_names, locks),

@@ -31,13 +31,17 @@ def _events_snapshot(shared_event, hand_initialized: bool) -> EventsSnapshot:
 def worker_hand_ctrl(shared_event, shm_name, shared_lock,
                      hand="inspire",
                      vr_input="hand", thumb_bend=0.5, thumb_yaw=0.5,
-                     tactile='off'):
+                     tactile='off',
+                     grasp_fingers="pinky,ring,middle,index", close_depth=1.0,
+                     grip_force=800, grip_speed=1000):
     """hand: 'inspire' (6+6 DOF, Inspire DDS) or 'dex3' (7+7 DOF, unitree_hg DDS).
     vr_input='hand' uses dex_retargeting from VR keypoints; vr_input='controller'
     uses Quest3 controller trigger as a grasp/release toggle, with thumb_bend/thumb_yaw
     (0..1) selecting a pre-set thumb pose.
     tactile: 'off' (default) | 'on'. Phase K8: on 시 DEX3 가 HandState.press_sensor_state
-    length 를 로깅. 실제 SHM 저장은 SDK 실 device sequence length 확정 후 후속 작업."""
+    length 를 로깅. 실제 SHM 저장은 SDK 실 device sequence length 확정 후 후속 작업.
+    grasp_fingers/close_depth/grip_force/grip_speed: Inspire controller-mode 전용
+    (어떤 손가락을 어느 깊이로, 파지력/속도 상한). DEX3 는 무시."""
     #Set SharedMemory
     television_shm = SharedMemoryManager(TELEVISION, shared_lock["television_lock"], shm_name["television_shm"])
     freq_shm = SharedMemoryManager(WORKER_FREQ, shared_lock["freq_lock"], shm_name["freq_shm"])
@@ -106,6 +110,8 @@ def worker_hand_ctrl(shared_event, shm_name, shared_lock,
                                 dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array,
                                 fps=100.0, Unit_Test=False,
                                 vr_input=vr_input, thumb_bend=thumb_bend, thumb_yaw=thumb_yaw,
+                                grasp_fingers=grasp_fingers, close_depth=close_depth,
+                                grip_force=grip_force, grip_speed=grip_speed,
                             )
                         elif hand == "dex3":
                             from hand_control.robot_hand_dex3 import Dex3_Controller
@@ -338,8 +344,8 @@ def worker_hand_ctrl(shared_event, shm_name, shared_lock,
                     robot_dict = robot_action_shm.read_data()
                     hand_action = robot_dict["action_hand"]
                     if hand == "inspire":
-                        # Inspire 는 0..1 normalized q
-                        hand_action = np.clip(hand_action, a_min=None, a_max=1.0)
+                        # Inspire 는 0..1 normalized q (음수/초과 양방향 클램프)
+                        hand_action = np.clip(hand_action, 0.0, 1.0)
                         left_q_target  = hand_action[:6]
                         right_q_target = hand_action[6:12]
                     else:  # dex3

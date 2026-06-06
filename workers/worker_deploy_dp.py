@@ -176,24 +176,25 @@ def action_to_array(action: dict, i: int, hand_type: str, layout) -> tuple:
 
 
 def dp_action_chunk_to_arrays(action_chunk: np.ndarray, hand_type: str) -> tuple:
-    """DP predict_action 출력 (n_action_steps, 28) → (full[T,19], hand[T,14|12]).
+    """DP predict_action 출력 (n_action_steps, 14+2*hd) → (full[T,19], hand[T,14|12]).
 
-    DP action 28D 레이아웃 (convert_to_dp 와 동일):
-        [0:7]=left_arm, [7:14]=right_arm, [14:21]=left_hand, [21:28]=right_hand.
+    DP action 레이아웃 (convert_to_dp = parquet action 컬럼 그대로 = record layout):
+        [0:7]=left_arm, [7:14]=right_arm, [14:14+hd]=left_hand, [14+hd:14+2*hd]=right_hand.
+        => DEX3(hd=7): 28D (좌손 14:21, 우손 21:28). Inspire(hd=6): 26D (좌손 14:20, 우손 20:26).
     write_shm 의 fixed-shape (waist3+head2+arm14, hand14) 에 맞춰:
         full[T,19] = [waist3=0, head2=0, left_arm7, right_arm7]
         hand[T,14|12] = [left_hand, right_hand]  (DEX3=14, inspire=12)
-    waist/head 는 DP 가 제어 안 함 (학습 28D = arm+hand) → zero.
+    waist/head 는 DP 가 제어 안 함 (학습 = arm+hand) → zero.
     """
     chunk = np.asarray(action_chunk, dtype=np.float32)
-    if chunk.ndim == 3:          # (B,T,28) → (T,28)
+    if chunk.ndim == 3:          # (B,T,D) → (T,D)
         chunk = chunk[0]
     T = chunk.shape[0]
     hd = 7 if hand_type == 'dex3' else 6
     left_arm   = chunk[:, 0:7]
     right_arm  = chunk[:, 7:14]
     left_hand  = chunk[:, 14:14 + hd]
-    right_hand = chunk[:, 14 + 7:14 + 7 + hd]   # 학습이 7+7=14 로 저장(DEX3). inspire 면 앞 hd 만.
+    right_hand = chunk[:, 14 + hd:14 + 2 * hd]   # 손은 6+6/7+7 연속 (record layout 그대로).
     waist = np.zeros((T, 3), dtype=np.float32)
     head  = np.zeros((T, 2), dtype=np.float32)
     full = np.concatenate([waist, head, left_arm, right_arm], axis=1)   # (T,19)
