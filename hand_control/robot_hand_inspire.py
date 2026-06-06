@@ -70,26 +70,31 @@ _FINGER_NAME_TO_IDX = {"pinky": 0, "ring": 1, "middle": 2, "index": 3}
 
 
 def _parse_grasp_fingers(spec):
-    """'index,middle' 또는 리스트 -> {0,1,2,3} subset. 빈/None -> 전체 4지."""
+    """'thumb,index,middle' 또는 리스트 -> (finger_idx_set ⊆ {0,1,2,3}, thumb_participates).
+
+    'thumb' 포함 시 엄지도 grasp 때 thumb_bend 로 굽음(open 때 펴짐). 엄지 회전(yaw)은
+    참여 여부와 무관하게 thumb_yaw 로 항상 적용(대향 각도). 빈/None -> 전체 4지 + thumb.
+    """
     if spec is None:
-        return set(_FINGER_NAME_TO_IDX.values())
+        return set(_FINGER_NAME_TO_IDX.values()), True
     if isinstance(spec, str):
         names = [s.strip().lower() for s in spec.split(",") if s.strip()]
     else:
         names = [str(s).strip().lower() for s in spec]
     if not names:
-        return set(_FINGER_NAME_TO_IDX.values())
+        return set(_FINGER_NAME_TO_IDX.values()), True
     idxs = set()
+    thumb = False
     for n in names:
         if n in _FINGER_NAME_TO_IDX:
             idxs.add(_FINGER_NAME_TO_IDX[n])
         elif n == "thumb":
-            # 엄지는 항상 자세 지정 — grasp_fingers 무시. (명시적 경고)
-            logger_mp.warning("[Inspire] 'thumb' in --grasp-fingers ignored "
-                              "(엄지는 --thumb-bend/--thumb-yaw 로 항상 자세 지정).")
+            thumb = True
         else:
-            logger_mp.warning(f"[Inspire] unknown finger name in --grasp-fingers: '{n}' (무시).")
-    return idxs or set(_FINGER_NAME_TO_IDX.values())
+            logger_mp.warning(f"[Inspire] unknown finger name in grasp-fingers: '{n}' (무시).")
+    if not idxs and not thumb:
+        return set(_FINGER_NAME_TO_IDX.values()), True
+    return idxs, thumb
 
 
 class Inspire_Controller:
@@ -121,12 +126,12 @@ class Inspire_Controller:
         self.thumb_yaw  = float(np.clip(thumb_yaw,  0.0, 1.0))
 
         # controller-mode 손가락 모드 설정
-        self.grasp_finger_idx = _parse_grasp_fingers(grasp_fingers)
+        self.grasp_finger_idx, self.thumb_participates = _parse_grasp_fingers(grasp_fingers)
         self.close_depth      = float(np.clip(close_depth, 0.0, 1.0))
         self.grip_force       = int(np.clip(int(grip_force), 0, _FORCE_MAX))
         self.grip_speed       = int(np.clip(int(grip_speed), 0, _SPEED_MAX))
         logger_mp.info(
-            f"[Inspire] grasp_fingers idx={sorted(self.grasp_finger_idx)} "
+            f"[Inspire] grasp_fingers idx={sorted(self.grasp_finger_idx)} thumb={self.thumb_participates} "
             f"close_depth={self.close_depth} grip_force={self.grip_force} grip_speed={self.grip_speed} "
             f"thumb_bend={self.thumb_bend} thumb_yaw={self.thumb_yaw}"
         )
@@ -297,18 +302,20 @@ class Inspire_Controller:
 
     # ------------------------------------------------------------------
     def _grip_q(self, grasp):
-        """controller-mode 6-vector 생성 (양손 동일 convention, 0..1, 1=open).
+        """controller-mode 6-vector 생성 (양손 동일 convention, 0..1, 1=open/펴짐).
 
-        idx0..3 = pinky/ring/middle/index, idx4=thumb_bend, idx5=thumb_yaw.
-        엄지는 항상 thumb_bend/thumb_yaw. grasp 시 grasp_fingers 포함 idx 만 closed.
+        idx0..3 = pinky/ring/middle/index, idx4 = thumb bend(굽힘), idx5 = thumb yaw(회전).
+        - idx5(엄지 회전=대향 각도)는 grasp/open 무관 *항상* thumb_yaw.
+        - grasp 시 grasp_fingers 포함 손가락은 closed, 엄지 참여 시 idx4=thumb_bend.
+        - open 시 손가락/엄지굽힘 모두 펴짐(1.0).
         """
         closed = max(0.0, 1.0 - self.close_depth)
-        q = [_OPEN_Q, _OPEN_Q, _OPEN_Q, _OPEN_Q]
+        q = [_OPEN_Q, _OPEN_Q, _OPEN_Q, _OPEN_Q, _OPEN_Q, self.thumb_yaw]
         if grasp:
             for i in self.grasp_finger_idx:
                 q[i] = closed
-        q.append(self.thumb_bend)
-        q.append(self.thumb_yaw)
+            if self.thumb_participates:
+                q[4] = self.thumb_bend
         return np.array(q, dtype=np.float64)
 
     def control_process(self, left_hand_array, right_hand_array, left_hand_state_array, right_hand_state_array,

@@ -44,13 +44,16 @@ python main.py [옵션]
 | `--lower-body` | `hoist` | `{hoist, loco}` | hoist=호이스트 현수 rt/lowcmd / loco=motion mode rt/arm_sdk |
 | `--gait` | `off` | `{off, thumbstick}` | (loco) 보행 |
 | `--gait-stick` | `split` | `{split, left, right}` | (loco+gait) stick 매핑 |
-| `--thumb-bend` | `0.5` | float 0..1 | Inspire 엄지 굽힘 (controller 모드) |
-| `--thumb-yaw` | `0.5` | float 0..1 | Inspire 엄지 yaw |
-| `--grasp-fingers` | `pinky,ring,middle,index` | comma subset | (Inspire controller) 파지 시 닫히는 손가락. 엄지는 항상 자세 지정 |
-| `--close-depth` | `1.0` | float 0..1 | (Inspire) 파지 깊이 (1.0=완전 폐쇄) |
-| `--grip-force` | `800` | int 0..1000 | (Inspire) force_set 파지력 상한(g). 도달 시 펌웨어 정지=과부하 차단 |
-| `--grip-speed` | `1000` | int 0..1000 | (Inspire) speed_set 속도 (1000=full≈800ms) |
+| `--grip-profile` | `full_oppose` | profile name | (Inspire) 상황별 그립 메뉴 선택. `full_oppose\|tripod\|pinch\|lateral\|hook` (→ `hand_control/inspire_grip_profiles.yaml`) |
+| `--thumb-bend` | (profile) | float 0..1 | (Inspire) 엄지 굽힘 override |
+| `--thumb-yaw` | (profile) | float 0..1 | (Inspire) 엄지 회전(대향 각도) override |
+| `--grasp-fingers` | (profile) | comma subset | (Inspire) 파지 시 닫히는 손가락. `pinky,ring,middle,index`(+`thumb` 시 엄지도 굽힘) override |
+| `--close-depth` | (profile) | float 0..1 | (Inspire) 파지 깊이 (1.0=완전 폐쇄) override |
+| `--grip-force` | (profile) | int 0..1000 | (Inspire) force_set 파지력 상한(g). 도달 시 펌웨어 정지=과부하 차단. **deploy 에서도 적용** |
+| `--grip-speed` | (profile) | int 0..1000 | (Inspire) speed_set 속도 (1000=full≈800ms) |
 | `--no-robot` | False | flag | G1/hand 워커 생략 (Quest3+IK만 검증) |
+
+> Inspire 그립 프로파일: `hand_control/inspire_grip_profiles.yaml` 를 열어 상황별 세팅(손가락 수·엄지 각도·force/speed)을 보고 `--grip-profile <name>` 로 선택. 값은 파일에서 직접 튜닝/추가 가능. 개별 플래그를 주면 그 항목만 override. 엄지 회전(yaw) 0..1 의 실제 방향(정면 대향 vs 측면)은 실하드웨어에서 1회 확인 후 필요 시 값 반전.
 
 ### 1-2. 자주 쓰는 조합
 
@@ -59,16 +62,21 @@ python main.py [옵션]
 python main.py --hand dex3 --camera realsense --vr-input controller \
                --waist fixed --head off --lower-body hoist
 
-# Inspire 양손 + 동일 셋업 (firm 파지: force 800, full speed, 4지 전부)
+# Inspire 양손 — 범용 파워 그립 (5지 전부 + 엄지 정면 대향)
 python main.py --hand inspire --camera realsense --vr-input controller \
-               --waist fixed --head off --lower-body hoist \
-               --thumb-bend 0.5 --thumb-yaw 0.5 \
-               --grasp-fingers pinky,ring,middle,index --grip-force 800 --grip-speed 1000
+               --waist fixed --head off --lower-body hoist --grip-profile full_oppose
 
-# Inspire — 엄지+검지+중지 핀치만, 부분 파지(60%)
+# Inspire — 엄지+검지+중지 3점(tripod) 프로파일
+python main.py --hand inspire --camera realsense --vr-input controller \
+               --waist fixed --head off --lower-body hoist --grip-profile tripod
+
+# Inspire — 프로파일 + 일부 override (tripod 인데 엄지 회전만 더 옆으로)
 python main.py --hand inspire --camera realsense --vr-input controller \
                --waist fixed --head off --lower-body hoist \
-               --grasp-fingers index,middle --close-depth 0.6 --thumb-bend 0.4 --thumb-yaw 0.5
+               --grip-profile tripod --thumb-yaw 0.6
+
+# (deploy) 수집 때 쓴 프로파일로 실행 → force/speed 안전 envelope 동일
+#   python evaluate_dp.py ...  와 함께 main.py 를 같은 --grip-profile 로 띄움
 
 # loco 모드 (모션 모드 진입 후 — 리모컨 L2+B → L2+UP → R1+X)
 python main.py --hand dex3 --camera realsense --vr-input controller \

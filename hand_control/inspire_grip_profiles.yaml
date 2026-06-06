@@ -1,0 +1,69 @@
+# Inspire RH56E2 controller-mode 그립 프로파일 (상황별 메뉴).
+#
+# 사용:  python main.py --hand inspire --vr-input controller --grip-profile tripod
+#   - 한 줄로 "손가락 수 + 엄지 각도 + 파지력/속도" 한 묶음을 선택.
+#   - 개별 플래그(--grasp-fingers/--close-depth/--thumb-bend/--thumb-yaw/--grip-force/--grip-speed)
+#     를 주면 그 항목만 프로파일 위에 덮어씀(override).
+#   - 학습된 정책 deploy 시에도 같은 --grip-profile 로 실행하면 force/speed 안전 envelope 가
+#     동일하게 맞춰짐 (단 deploy 의 손가락 q 는 정책이 직접 출력 → finger/thumb 항목은 무의미,
+#     grip_force/grip_speed 만 적용됨).
+#
+# 값 규약 (모두 0..1 정규화, angle_set 1000=open/펴짐, 0=closed/굽힘):
+#   grasp_fingers : 파지(트리거 토글 ON) 시 닫히는 손가락. pinky/ring/middle/index 중 부분집합
+#                   + 'thumb' 포함 시 엄지도 grasp 때 thumb_bend 로 굽힘(open 때 펴짐).
+#   close_depth   : 손가락 파지 깊이 (1.0=완전 폐쇄, 0.x=부분).
+#   thumb_bend    : 엄지 굽힘량(grasp 때). 작을수록 더 안쪽으로 굽음.
+#   thumb_yaw     : ★엄지 회전(대향 각도)★ — 항상 적용(grasp/open 무관). 손가락과 마주보는 정도.
+#                   0..1 이 회전 가동범위(대략 75°~170°)를 스팬. *어느 끝이 '정면 대향'인지는
+#                   실하드웨어에서 1회 확인 후 필요하면 값을 뒤집어 미세조정* (펌웨어 정규화라
+#                   소프트 한계 없음, 안전).
+#   grip_force    : force_set 0..1000 (g). 도달 시 펌웨어가 그 손가락 정지(STATUS=3)=과부하 차단.
+#   grip_speed    : speed_set 0..1000 (1000=full≈800ms).
+
+default_profile: full_oppose
+
+profiles:
+  # 5지 전부 + 엄지 정면 대향. 범용 파워/풀 그립 (큰 물체, 확실히 쥐기).
+  full_oppose:
+    grasp_fingers: [thumb, index, middle, ring, pinky]
+    close_depth: 1.0
+    thumb_bend: 0.2
+    thumb_yaw: 0.1
+    grip_force: 800
+    grip_speed: 1000
+
+  # 엄지+검지+중지 3점 (tripod). 중간 크기 물체 정밀 파지.
+  tripod:
+    grasp_fingers: [thumb, index, middle]
+    close_depth: 1.0
+    thumb_bend: 0.3
+    thumb_yaw: 0.2
+    grip_force: 700
+    grip_speed: 1000
+
+  # 엄지+검지 2점 핀치. 작은/얇은 물체.
+  pinch:
+    grasp_fingers: [thumb, index]
+    close_depth: 1.0
+    thumb_bend: 0.35
+    thumb_yaw: 0.15
+    grip_force: 600
+    grip_speed: 900
+
+  # 엄지를 옆으로 비스듬히 (lateral/key 그립). 카드/납작한 손잡이.
+  lateral:
+    grasp_fingers: [thumb, index, middle, ring, pinky]
+    close_depth: 0.85
+    thumb_bend: 0.5
+    thumb_yaw: 0.85
+    grip_force: 700
+    grip_speed: 900
+
+  # 엄지 미사용 4지 갈고리 (hook). 봉/손잡이에 손가락만 걸기.
+  hook:
+    grasp_fingers: [index, middle, ring, pinky]
+    close_depth: 1.0
+    thumb_bend: 1.0
+    thumb_yaw: 1.0
+    grip_force: 800
+    grip_speed: 1000

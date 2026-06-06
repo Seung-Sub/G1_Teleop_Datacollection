@@ -104,6 +104,24 @@ Inspire RH56E2(=RH56DFTP, Unitree 부품명 RH56DFQ-2L/2R) 5지 핸드로도 **�
 
 ---
 
+## 3.4 그립 프로파일 UX (추가 — 사용자 피드백 반영)
+
+사용자 요구: "상황별로 손가락 수 + 엄지 각도(특히 안쪽 회전=대향 각도)를 미리 만든 메뉴에서
+골라 쓰기. 일일이 숫자로 적기 X." → 이름 붙인 프로파일 메뉴.
+
+- `hand_control/inspire_grip_profiles.yaml`: `profiles.<name> = {grasp_fingers, close_depth,
+  thumb_bend, thumb_yaw, grip_force, grip_speed}` + `default_profile`. 기본 5종:
+  `full_oppose`(5지+엄지 대향), `tripod`(엄지+검지+중지), `pinch`(엄지+검지), `lateral`(엄지 측면),
+  `hook`(엄지 미사용 4지). 파일에서 직접 보고/튜닝/추가.
+- `main.py --grip-profile <name>` + `resolve_hand_shape(args)`: 우선순위
+  **명시 플래그 > 프로파일 > 파일 default > fallback**. dex3 는 프로파일 무관(thumb_bend/yaw 만 의미,
+  None→fallback). 해소된 값만 worker 로 전달(시그니처 불변).
+- 엄지 모델 변경: `_grip_q` 에서 idx5(회전)=`thumb_yaw` 항상 적용(대향 각도), `thumb` 가
+  grasp_fingers 에 포함되면 grasp 때 idx4=`thumb_bend` 로 굽고 open 때 펴짐. (기존 "엄지 완전 고정"
+  → "엄지 회전=상황 고정 / 굽힘=grasp 참여" 로 정교화.)
+- deploy 주의: deploy 의 손가락 q 는 정책이 직접 출력 → finger/thumb 항목 무의미, `grip_force/
+  grip_speed` 안전 envelope 만 적용. "수집 때 쓴 --grip-profile 로 deploy" = envelope 일치.
+
 ## 4. 범위 밖 / 리스크
 - DEX3 경로, record 스키마, GR00T deploy, hand-mode retargeting, tactile 저장: 미변경.
 - `inspire_sdkpy` 가 현재 conda 인터프리터엔 미설치(소스는 `G1_1.7.../inspire_hand_sdk`).

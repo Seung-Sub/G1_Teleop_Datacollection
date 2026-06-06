@@ -179,23 +179,27 @@ def parse_args():
                              "'right' = 오른쪽 스틱만.")
     # Inspire thumb 사전 자세 (vr_input=controller 일 때만 사용; 손가락 4개는 trigger로 토글)
     # 값 범위: 0.0(굽힘/안쪽) ~ 1.0(펼침/바깥쪽). 물체에 따라 잡기 편한 자세를 사전 설정.
-    parser.add_argument('--thumb-bend', dest='thumb_bend', type=float, default=0.5,
-                        help='Inspire thumb bend angle (controller mode only, 0..1)')
-    parser.add_argument('--thumb-yaw',  dest='thumb_yaw',  type=float, default=0.5,
-                        help='Inspire thumb yaw   angle (controller mode only, 0..1)')
-    # Inspire controller-mode 손가락 모드 / 파지 안전 (DEX3 는 무시)
-    parser.add_argument('--grasp-fingers', dest='grasp_fingers',
-                        default='pinky,ring,middle,index',
-                        help="(Inspire controller mode) 파지 시 닫히는 손가락 subset, comma 구분. "
-                             "선택: pinky,ring,middle,index. 엄지는 --thumb-bend/--thumb-yaw 로 "
-                             "항상 자세 지정. 예: --grasp-fingers index,middle")
-    parser.add_argument('--close-depth', dest='close_depth', type=float, default=1.0,
-                        help="(Inspire) 파지 깊이 0..1 (1.0=완전 폐쇄, 0.x=부분).")
-    parser.add_argument('--grip-force', dest='grip_force', type=int, default=800,
-                        help="(Inspire) DOF별 파지력 상한 force_set 0..1000(g). force_act 도달 시 "
-                             "펌웨어가 그 손가락 정지(STATUS=3)=과부하 차단. firm 파지+열 마진 기본 800.")
-    parser.add_argument('--grip-speed', dest='grip_speed', type=int, default=1000,
-                        help="(Inspire) DOF별 속도 speed_set 0..1000 (1000=full≈800ms). 기본 full.")
+    # Inspire controller-mode 그립 — 상황별 프로파일 메뉴 (hand_control/inspire_grip_profiles.yaml).
+    # --grip-profile 로 "손가락 수 + 엄지 각도 + force/speed" 묶음 선택. 아래 개별 플래그는 override.
+    # (DEX3 는 thumb_bend/thumb_yaw 만 사용, 나머지는 무시.)
+    parser.add_argument('--grip-profile', dest='grip_profile', default=None,
+                        help="(Inspire) 그립 프로파일 이름 (inspire_grip_profiles.yaml). "
+                             "예: full_oppose|tripod|pinch|lateral|hook. 미지정 시 파일의 default_profile.")
+    parser.add_argument('--thumb-bend', dest='thumb_bend', type=float, default=None,
+                        help='Inspire 엄지 굽힘 0..1 (controller). 미지정 시 프로파일 값.')
+    parser.add_argument('--thumb-yaw',  dest='thumb_yaw',  type=float, default=None,
+                        help='Inspire 엄지 회전(대향 각도) 0..1 (controller). 미지정 시 프로파일 값.')
+    parser.add_argument('--grasp-fingers', dest='grasp_fingers', default=None,
+                        help="(Inspire) 파지 시 닫히는 손가락 subset, comma 구분. "
+                             "pinky,ring,middle,index (+thumb 포함 시 엄지도 grasp 때 굽힘). "
+                             "예: --grasp-fingers thumb,index,middle. 미지정 시 프로파일 값.")
+    parser.add_argument('--close-depth', dest='close_depth', type=float, default=None,
+                        help="(Inspire) 파지 깊이 0..1 (1.0=완전 폐쇄). 미지정 시 프로파일 값.")
+    parser.add_argument('--grip-force', dest='grip_force', type=int, default=None,
+                        help="(Inspire) force_set 0..1000(g). 도달 시 펌웨어 정지(STATUS=3)=과부하 차단. "
+                             "미지정 시 프로파일 값. (deploy 에서도 적용되는 안전 envelope.)")
+    parser.add_argument('--grip-speed', dest='grip_speed', type=int, default=None,
+                        help="(Inspire) speed_set 0..1000 (1000=full≈800ms). 미지정 시 프로파일 값.")
     # Phase F: G1/Hand 하드웨어 없이 Quest3 입력 + IK 계산만 검증
     parser.add_argument('--no-robot', dest='no_robot', action='store_true',
                         help='G1 / hand 워커 spawn 생략 + set_g1/set_hand 자동 set (Quest3 + IK 검증용)')
@@ -644,12 +648,59 @@ def _install_signal_handlers(events):
         pass  # 일부 환경(예: thread 안) 에서는 등록 불가, 무시
 
 
+_GRIP_PROFILE_PATH = "hand_control/inspire_grip_profiles.yaml"
+# dex3 / 프로파일 로드 실패 시의 안전 기본값 (= 기존 동작).
+_HAND_SHAPE_FALLBACK = {
+    'grasp_fingers': 'pinky,ring,middle,index', 'close_depth': 1.0,
+    'thumb_bend': 0.5, 'thumb_yaw': 0.5, 'grip_force': 800, 'grip_speed': 1000,
+}
+
+
+def resolve_hand_shape(args):
+    """Inspire 그립 프로파일 + 개별 플래그 override 를 args 에 in-place 반영.
+
+    우선순위: 명시적 CLI 플래그 > --grip-profile 프로파일 > 파일 default_profile > _HAND_SHAPE_FALLBACK.
+    dex3 는 프로파일 무관 — None 인 항목만 fallback 으로 채운다 (thumb_bend/yaw 만 의미).
+    grasp_fingers 는 리스트로 들어오면 comma 문자열로 정규화.
+    """
+    prof = {}
+    if args.hand == 'inspire':
+        try:
+            import yaml
+            doc = yaml.safe_load(open(_GRIP_PROFILE_PATH))
+            profiles = doc.get('profiles', {})
+            name = args.grip_profile or doc.get('default_profile')
+            if name not in profiles:
+                logger_mp.warning(
+                    f"[main] grip-profile '{name}' 없음 (선택: {list(profiles)}). fallback 사용.")
+            else:
+                prof = dict(profiles[name])
+                logger_mp.info(f"[main] grip-profile '{name}': {prof}")
+        except Exception as e:
+            logger_mp.warning(f"[main] grip-profile 로드 실패({e}). fallback 사용.")
+
+    def pick(key):
+        v = getattr(args, key)
+        if v is not None:          # 명시적 CLI override
+            return v
+        if key in prof:            # 프로파일 값
+            return prof[key]
+        return _HAND_SHAPE_FALLBACK[key]
+
+    for key in _HAND_SHAPE_FALLBACK:
+        setattr(args, key, pick(key))
+    # grasp_fingers 리스트 -> comma 문자열 (worker/controller 는 문자열/리스트 모두 파싱하나 통일).
+    if isinstance(args.grasp_fingers, (list, tuple)):
+        args.grasp_fingers = ",".join(str(x) for x in args.grasp_fingers)
+
+
 def main():
     # 이전 run 잔존물 자동 정리 (process + SHM). 사용자가 매번 신경쓸 필요 없게.
     preflight_cleanup()
     _write_pidfile()
 
     args      = parse_args()
+    resolve_hand_shape(args)
 
     # Phase N — lower_body / vr_input / waist / gait 안전 검증.
     if args.lower_body == 'loco':
