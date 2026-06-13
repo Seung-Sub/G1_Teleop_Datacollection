@@ -220,12 +220,17 @@ Quest 3 USB 연결은 별도 단계 — [`docs/QUEST3_SETUP.md`](docs/QUEST3_SET
 --vr-input    {hand, controller}         (default: hand)
 --waist       {hmd, fixed}               HMD→waist 매핑 활성 / 고정
 --head        {dxl, off}                 Dynamixel head 사용 / 미사용
---tactile     {off, on}                  DEX3 press_sensor_state 로깅 (실 device 시퀀스 length 측정용)
+--tactile     {off, on}                  손 촉각 로깅. on=DEX3 press_sensor_state / Inspire 17점 촉각.
+                                         (Inspire 는 off 일 때 손 상태 Hz↑ — 브리지가 촉각 미read)
 --lower-body  {hoist, loco}              hoist=rt/lowcmd (호이스트 현수 전제),
                                          loco=rt/arm_sdk (motion mode, 내장 LocoClient 가 leg/waist 제어)
 --gait        {off, thumbstick}          (loco 전용) thumbstick→LocoClient.Move 보행
 --gait-stick  {split, left, right}       (gait=thumbstick) stick 매핑 방식
---thumb-bend, --thumb-yaw  (0.0~1.0)     controller-mode 엄지 사전 자세
+--thumb-bend, --thumb-yaw  (0.0~1.0)     (Inspire) controller-mode 엄지 사전 자세 override
+--grip-profile  <name>                   (Inspire) 그립 프로파일 {full_oppose,tripod,pinch,lateral,hook}
+                                         (hand_control/inspire_grip_profiles.yaml). 상세는 USAGE.md
+--grasp-fingers, --close-depth           (Inspire) 파지 손가락 subset / 깊이 override
+--grip-force, --grip-speed  (0~1000)     (Inspire) force_set(g)/speed_set 상한 — 과부하 차단·파지속도 (deploy 에도 적용)
 --no-robot                               G1/hand worker 생략 (set_g1/set_hand 자동 set)
 ```
 

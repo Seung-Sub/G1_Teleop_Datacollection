@@ -31,6 +31,12 @@ record_gr00t/
 *.parquet
 *.mp4
 
+# 대용량 데이터/모델/임시 아티팩트 (로컬 전용 — 레포 비동기화)
+/data/
+/checkpoints/
+/tree_output.txt
+*.whl
+
 # Manual artifact bundles (임시 패키징 zip)
 *.zip
 

@@ -40,7 +40,7 @@ python main.py [옵션]
 | `--vr-input` | `hand` | `{hand, controller}` | Quest3 입력 모드. controller 권장 |
 | `--waist` | `hmd` | `{hmd, fixed}` | waist: HMD 변위 / 고정 |
 | `--head` | `dxl` | `{dxl, off}` | Dynamixel head 사용 / 비활성 |
-| `--tactile` | `off` | `{off, on}` | DEX3 press_sensor_state 로깅 |
+| `--tactile` | `off` | `{off, on}` | 손 촉각 로깅. on=DEX3 press_sensor_state / Inspire 17점 촉각. **Inspire는 off일 때 손 상태 Hz↑**(브리지가 촉각 미read) |
 | `--lower-body` | `hoist` | `{hoist, loco}` | hoist=호이스트 현수 rt/lowcmd / loco=motion mode rt/arm_sdk |
 | `--gait` | `off` | `{off, thumbstick}` | (loco) 보행 |
 | `--gait-stick` | `split` | `{split, left, right}` | (loco+gait) stick 매핑 |

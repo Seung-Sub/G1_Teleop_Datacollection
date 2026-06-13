@@ -153,9 +153,23 @@ print('unitree_sdk2py G1 + DEX3 IDL OK')
 pip install cyclonedds
 ```
 
-### 4-3. Inspire SDK (Inspire RH56 손 사용 시)
-- inspire_sdkpy 는 Inspire 공식 repo 에서 clone + pip install.
-- 미사용 시 (DEX3 만) skip 가능.
+### 4-3. Inspire SDK (Inspire RH56 손 사용 시 — DEX3 만 쓰면 skip 가능)
+
+`inspire_sdkpy` 는 PyPI 에 없음 — Inspire/Unitree 제공 소스(`inspire_hand_sdk`, `setup.py` 포함)에서 설치.
+`workers/worker_hand_dds.py` 가 `from inspire_sdkpy import inspire_sdk, inspire_hand_defaut` 로 사용.
+
+```bash
+# 1) 의존성 (cyclonedds 는 §4-2 에서 이미 설치 — 재설치 금지: unitree DDS 와 같은 0.10.2 공유)
+pip install 'pymodbus==3.6.9' colorcet      # pyserial / numpy 는 보통 이미 충족됨
+
+# 2) inspire_sdkpy 설치 (--no-deps 로 cyclonedds 버전 보존)
+pip install --no-deps <inspire_hand_sdk 경로>
+```
+검증:
+```bash
+python -c "from inspire_sdkpy import inspire_sdk, inspire_hand_defaut; print('inspire_sdkpy OK', hasattr(inspire_sdk,'ModbusDataHandler'))"
+```
+> ⚠️ editable(`-e`) 대신 **일반 설치 권장** — 소스 폴더를 이동/삭제해도 env 가 깨지지 않음(site-packages 로 복사됨).
 
 ### 4-4. Dynamixel SDK — **필수** (운용 모드 무관)
 `workers/worker_g1_ctrl.py` 가 `g1_control.g1_head_dynamixel` 을 static import →
