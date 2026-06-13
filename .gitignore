@@ -35,6 +35,7 @@ record_gr00t/
 /data/
 /checkpoints/
 /tree_output.txt
+/logs.md
 *.whl
 
 # Manual artifact bundles (임시 패키징 zip)
