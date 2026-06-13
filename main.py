@@ -376,9 +376,9 @@ def get_worker_specs(args, events, locks, shm_names):
                             args.grasp_fingers, args.close_depth, args.grip_force, args.grip_speed),
                  'name':   'WORKER_HAND'},
                 # Inspire 전용 터치센서 Modbus DDS
-                {'target': worker_hand_r_dds, 'args': ('192.168.123.210', 'r', 'Right-hand process', shm_names, locks),
+                {'target': worker_hand_r_dds, 'args': ('192.168.123.210', 'r', 'Right-hand process', shm_names, locks, args.tactile),
                  'name': 'WORKER_HAND_R_DDS'},
-                {'target': worker_hand_l_dds, 'args': ('192.168.123.211', 'l', 'Left-hand process',  shm_names, locks),
+                {'target': worker_hand_l_dds, 'args': ('192.168.123.211', 'l', 'Left-hand process',  shm_names, locks, args.tactile),
                  'name': 'WORKER_HAND_L_DDS'},
             ]
         elif args.hand == 'dex3':
