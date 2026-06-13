@@ -27,8 +27,17 @@ cameras:
     serial: "046322250265"   # D455 — 작업공간 정면 시점 (정책 주 시점)
   - role: wrist_l
     type: realsense
-    serial: "128422272260"   # D405 — 새 device (2026-05-22 교체). 
+    serial: "260322273344"   # D405 — 새 device (2026-06-12 교체).
+    # D405 AE 는 60fps 에서 gain 을 floor(16) 고정+노출 상한이라 손목뷰가 어두움(mean39, crushed). manual 고정.
+    # VLA(GR00T N1.7: 256 다운스케일 + Cosmos-Reason2 백본 + 학습 ColorJitter → 절대밝기 비민감) 기준 최적화:
+    # ①60fps 최우선(exp<~12000μs; exp16000=fps반토막) ②블러 억제(짧은 노출, 다운스케일로 복구불가)
+    # ③노이즈는 256 다운스케일이 완화(게인 부담↓) ④crushed black 회피(디테일 보존) ⑤고정노출=프레임간 일관성.
+    # 검증: exp8000/gain96 → 60fps, 저장 wrist mean~90(이전 39), crushed 16%(이전 54%). (조명 따라 튜닝)
+    exposure: 8000
+    gain: 96
   - role: wrist_r
     type: realsense
-    serial: "409122271579"   # D405 — 새 device (2026-05-22 교체). 
+    serial: "260322270668"   # D405 — 새 device (2026-06-12 교체).
+    exposure: 8000
+    gain: 96
 
