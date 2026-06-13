@@ -110,6 +110,12 @@ def worker_camera(shared_event, shm_name, shared_lock,
     # gain 을 최저 고정해 어둡게 잡는 경우 밝기 + 프레임간 일관성 확보. 미지정이면 AE 유지.
     if exposure is not None or gain is not None:
         try:
+            # 스트림 안정화: 첫 프레임이 흐른 뒤 옵션 적용(set-before-first-frame 회피).
+            for _ in range(5):
+                try:
+                    pipeline.wait_for_frames(1000)
+                except Exception:
+                    break
             ctrl = None
             for s in profile.get_device().query_sensors():
                 if s.supports(rs.option.exposure) and s.supports(rs.option.gain):
