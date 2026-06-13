@@ -20,7 +20,8 @@ from utils.rate import Rate
 
 
 def worker_camera(shared_event, shm_name, shared_lock,
-                  serial=None, role='ego', shm_key=None, lock_key=None):
+                  serial=None, role='ego', shm_key=None, lock_key=None,
+                  exposure=None, gain=None):
     """RealSense color@30Hz 워커 (단일 device).
 
     Args:
@@ -104,6 +105,29 @@ def worker_camera(shared_event, shm_name, shared_lock,
             logger_mp.warning(f"[Realsense:{role}] global_time_enabled 미지원 — perf_counter_ns fallback.")
     except Exception as e:
         logger_mp.warning(f"[Realsense:{role}] global_time setup 실패: {e}")
+
+    # 노출/게인 (선택, cameras.yaml): 지정 시 manual 고정(AE off). D405 wrist 처럼 AE 가
+    # gain 을 최저 고정해 어둡게 잡는 경우 밝기 + 프레임간 일관성 확보. 미지정이면 AE 유지.
+    if exposure is not None or gain is not None:
+        try:
+            ctrl = None
+            for s in profile.get_device().query_sensors():
+                if s.supports(rs.option.exposure) and s.supports(rs.option.gain):
+                    nm = s.get_info(rs.camera_info.name).lower()
+                    if ctrl is None or 'rgb' in nm or 'color' in nm:
+                        ctrl = s
+            if ctrl is not None:
+                if ctrl.supports(rs.option.enable_auto_exposure):
+                    ctrl.set_option(rs.option.enable_auto_exposure, 0)
+                if exposure is not None:
+                    ctrl.set_option(rs.option.exposure, float(exposure))
+                if gain is not None:
+                    ctrl.set_option(rs.option.gain, float(gain))
+                logger_mp.info(f"[Realsense:{role}] manual exposure={exposure} gain={gain} (AE off)")
+            else:
+                logger_mp.warning(f"[Realsense:{role}] exposure/gain 제어 센서 미발견 — AE 유지")
+        except Exception as e:
+            logger_mp.warning(f"[Realsense:{role}] exposure/gain 설정 실패: {e} — AE 유지")
 
     _sys0  = time.time_ns()
     _mono0 = time.perf_counter_ns()

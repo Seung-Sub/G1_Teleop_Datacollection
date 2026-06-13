@@ -285,7 +285,8 @@ def resolve_cameras_config(args):
                     continue
             else:
                 nm = None
-            out.append({'role': role, 'type': typ, 'serial': str(sn), 'name': nm})
+            out.append({'role': role, 'type': typ, 'serial': str(sn), 'name': nm,
+                        'exposure': cam.get('exposure'), 'gain': cam.get('gain')})
         return out
 
     # YAML 미사용 → 단일 카메라 (ego 1대)
@@ -407,7 +408,8 @@ def get_worker_specs(args, events, locks, shm_names):
             if typ == 'realsense':
                 from workers.worker_camera import worker_camera
                 specs += [{'target': worker_camera,
-                           'args':   (events, shm_names, locks, sn, role, shm_key, lock_key),
+                           'args':   (events, shm_names, locks, sn, role, shm_key, lock_key,
+                                      cam.get('exposure'), cam.get('gain')),
                            'name':   f'WORKER_RS_{role.upper()}'}]
             elif typ == 'zed':
                 from workers.worker_zed import worker_zed
