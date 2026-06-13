@@ -64,6 +64,7 @@ _OPEN_Q        = 1.0        # 정규화 open
 _FAULT_STATUS  = (5, 6, 7)  # 5=전류보호 6=락드로터 7=고장 (스펙 §4.6)
 _TEMP_HOLD_C   = 75         # 이 온도 이상 DOF 는 추가 가압 중단
 _FAULT_LOG_INTERVAL = 2.0   # fault 로그 rate-limit (초)
+_FAULT_PERSIST_S    = 0.25  # 이 시간 이상 연속 지속된 fault 만 확정(일시적 통신오류/센서 오독 필터)
 
 # 손가락 이름 -> DOF idx (엄지는 thumb_bend/thumb_yaw 로 항상 자세 지정하므로 제외)
 _FINGER_NAME_TO_IDX = {"pinky": 0, "ring": 1, "middle": 2, "index": 3}
@@ -167,9 +168,12 @@ class Inspire_Controller:
         self._r_force  = [0] * Inspire_Num_Motors
         self._l_curr   = [0] * Inspire_Num_Motors
         self._r_curr   = [0] * Inspire_Num_Motors
-        # fault 로그 rate-limit + 이전 상태 (변화 시에만 로깅).
-        self._fault_last_log = {'l': 0.0, 'r': 0.0}
-        self._prev_status    = {'l': None, 'r': None}
+        # fault persistence: 일시적 글리치(통신오류/센서 오독)는 무시하고 _FAULT_PERSIST_S
+        # 이상 연속 지속된 DOF 만 "확정 fault" 로 간주(로그 + safe-hold). 콜백이 갱신.
+        self._fault_since     = {'l': [0.0] * Inspire_Num_Motors, 'r': [0.0] * Inspire_Num_Motors}
+        self._confirmed_fault = {'l': [False] * Inspire_Num_Motors, 'r': [False] * Inspire_Num_Motors}
+        self._fault_last_log  = {'l': 0.0, 'r': 0.0}
+        self._prev_fault      = {'l': (), 'r': ()}
 
         # cmd 객체 — force/speed/mode 는 정적이라 init 시 1회 세팅, angle_set 만 매 publish 갱신.
         self.cmd_L = inspire_hand_defaut.get_inspire_hand_ctrl()
@@ -238,27 +242,49 @@ class Inspire_Controller:
             self._r_status, self._r_err, self._r_temp = status, err, temp
             self._r_force, self._r_curr = list(msg.force_act), list(msg.current)
             self.right_state_recv_ts = recv_ts
-        self._maybe_log_fault(side, status, err, temp)
+        self._update_fault_state(side, status, err, temp)
+        self._maybe_log_fault(side)
 
-    def _maybe_log_fault(self, side, status, err, temp):
-        """fault(STATUS 5/6/7 또는 err≠0 또는 과온) 를 변화 시 + rate-limit 로 로깅."""
-        faulted = any(s in _FAULT_STATUS for s in status) or any(e != 0 for e in err) \
-                  or any(t >= _TEMP_HOLD_C for t in temp)
-        if not faulted:
-            self._prev_status[side] = tuple(status)
+    def _update_fault_state(self, side, status, err, temp):
+        """DOF별 순간 fault 여부 → 연속 지속시간 추적 → _FAULT_PERSIST_S 이상이면 확정.
+        일시적 통신오류(通讯故障)/센서 오독(예: temp 단일샘플 spike)은 확정 전에 해소되어
+        필터링된다. 확정 결과(self._confirmed_fault[side]) 는 safe-hold 가 참조."""
+        now = time.time()
+        since     = self._fault_since[side]
+        confirmed = self._confirmed_fault[side]
+        for idx in range(Inspire_Num_Motors):
+            inst = (status[idx] in _FAULT_STATUS) or (err[idx] != 0) or (temp[idx] >= _TEMP_HOLD_C)
+            if inst:
+                if since[idx] == 0.0:
+                    since[idx] = now
+                confirmed[idx] = (now - since[idx]) >= _FAULT_PERSIST_S
+            else:
+                since[idx] = 0.0
+                confirmed[idx] = False
+
+    def _maybe_log_fault(self, side):
+        """확정 fault DOF 집합이 바뀔 때 + rate-limit 로만 로깅. 일반 grip status(0/1/2)
+        변화나 일시적 글리치엔 반응하지 않아 로그 스팸이 없다."""
+        confirmed = self._confirmed_fault[side]
+        key = tuple(i for i, c in enumerate(confirmed) if c)
+        if not key:
+            self._prev_fault[side] = ()
             return
         now = time.time()
-        changed = (self._prev_status[side] != tuple(status))
+        changed = (self._prev_fault[side] != key)
         if changed or (now - self._fault_last_log[side] >= _FAULT_LOG_INTERVAL):
             self._fault_last_log[side] = now
-            self._prev_status[side]    = tuple(status)
+            self._prev_fault[side]     = key
+            status = self._l_status if side == 'l' else self._r_status
+            err    = self._l_err    if side == 'l' else self._r_err
+            temp   = self._l_temp   if side == 'l' else self._r_temp
             try:
                 err_desc = [inspire_hand_defaut.get_error_description(e) if e else "" for e in err]
             except Exception:
                 err_desc = err
             logger_mp.warning(
-                f"[Inspire:{side}] FAULT status={status} err={err_desc} temp={temp} "
-                f"-> 해당 DOF 추가 가압 중단(safe-hold)."
+                f"[Inspire:{side}] FAULT(지속) dof={list(key)} status={status} err={err_desc} "
+                f"temp={temp} -> 해당 DOF 추가 가압 중단(safe-hold)."
             )
 
     def get_hand_state_recv_ts(self) -> int:
@@ -277,13 +303,11 @@ class Inspire_Controller:
         추가 가압을 멈춘다(펌웨어가 실제 cutoff 를 막고, 이 hold 는 반복 가압을 억제).
         """
         q = np.asarray(q_target, dtype=np.float64).copy()
-        if side == 'l':
-            cur_raw, status, err, temp = list(self._left_state_ref[:]),  self._l_status, self._l_err, self._l_temp
-        else:
-            cur_raw, status, err, temp = list(self._right_state_ref[:]), self._r_status, self._r_err, self._r_temp
+        cur_raw   = list(self._left_state_ref[:]) if side == 'l' else list(self._right_state_ref[:])
+        confirmed = self._confirmed_fault[side]   # _FAULT_PERSIST_S 이상 지속된 DOF 만 True
         for idx in range(Inspire_Num_Motors):
-            if status[idx] in _FAULT_STATUS or err[idx] != 0 or temp[idx] >= _TEMP_HOLD_C:
-                q[idx] = cur_raw[idx] / float(_ANGLE_MAX)   # hold current
+            if confirmed[idx]:
+                q[idx] = cur_raw[idx] / float(_ANGLE_MAX)   # hold current (확정 fault DOF)
         angle_set = [int(np.clip(round(v * _ANGLE_MAX), 0, _ANGLE_MAX)) for v in q]
         return angle_set
 
